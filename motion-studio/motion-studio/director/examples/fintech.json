@@ -1,0 +1,580 @@
+{
+ "timeline": {
+  "fps": 30,
+  "duration": 12,
+  "palette": {
+   "primary": "#3b82f6",
+   "accent": "#f5c451",
+   "text": "#ffffff"
+  },
+  "background": {
+   "type": "gradient",
+   "colors": [
+    "#040816",
+    "#0a1f5c",
+    "#0b2a7a"
+   ],
+   "angle": 165,
+   "vignette": 0.5,
+   "grain": 0.07,
+   "orbs": 6,
+   "orbColor": "#3b82f6",
+   "seed": 3
+  },
+  "camera": [
+   [
+    0,
+    1,
+    0,
+    0,
+    0
+   ],
+   [
+    6,
+    1.0,
+    0,
+    0,
+    0
+   ],
+   [
+    9.5,
+    1.12,
+    0,
+    -40,
+    0,
+    "inOutQuart"
+   ],
+   [
+    11,
+    1.0,
+    0,
+    0,
+    0,
+    "inOutQuart"
+   ]
+  ],
+  "layers": [
+   {
+    "id": "dust",
+    "type": "particles",
+    "start": 0,
+    "end": 12,
+    "z": 1,
+    "props": {
+     "mode": "float",
+     "count": 70,
+     "size": [
+      3,
+      10
+     ],
+     "life": 9,
+     "seed": 4
+    }
+   },
+   {
+    "id": "headline",
+    "type": "text",
+    "start": 0.3,
+    "end": 3.2,
+    "x": 540,
+    "y": 330,
+    "z": 30,
+    "exit": {
+     "preset": "fade",
+     "dur": 0.4
+    },
+    "props": {
+     "text": "Money that moves\nat your speed",
+     "size": 92,
+     "weight": 800,
+     "font": "Poppins",
+     "mode": "words",
+     "stagger": 0.11,
+     "highlight": [
+      "speed"
+     ],
+     "lineHeight": 1.08
+    }
+   },
+   {
+    "id": "phone",
+    "type": "image",
+    "start": 1.0,
+    "end": 12,
+    "x": 540,
+    "y": 1180,
+    "z": 10,
+    "enter": {
+     "preset": "slideUp",
+     "dur": 1.1,
+     "distance": 260,
+     "ease": "outExpo"
+    },
+    "anim": {
+     "sheen": [
+      [
+       2.2,
+       0
+      ],
+      [
+       3.1,
+       1.1
+      ]
+     ],
+     "scale": [
+      [
+       1,
+       0.96
+      ],
+      [
+       12,
+       1.04,
+       "inOut"
+      ]
+     ],
+     "opacity": [
+      [
+       9.8,
+       1
+      ],
+      [
+       10.7,
+       0.22,
+       "inOut"
+      ]
+     ]
+    },
+    "props": {
+     "asset": "phone.png",
+     "width": 620,
+     "glow": {
+      "color": "#3b82f6",
+      "blur": 38,
+      "opacity": 0.55
+     },
+     "shadow": {
+      "y": 40,
+      "blur": 60,
+      "opacity": 0.55
+     }
+    }
+   },
+   {
+    "id": "l1",
+    "type": "line",
+    "start": 3.4,
+    "end": 8.5,
+    "z": 5,
+    "enter": {
+     "preset": "draw",
+     "dur": 0.9,
+     "ease": "inOut"
+    },
+    "exit": {
+     "preset": "fade",
+     "dur": 0.5
+    },
+    "props": {
+     "points": [
+      [
+       360,
+       760
+      ],
+      [
+       240,
+       640
+      ],
+      [
+       130,
+       560
+      ]
+     ],
+     "color": "#60a5fa",
+     "width": 5,
+     "curve": 0.9
+    }
+   },
+   {
+    "id": "l2",
+    "type": "line",
+    "start": 3.6,
+    "end": 8.5,
+    "z": 5,
+    "enter": {
+     "preset": "draw",
+     "dur": 0.9,
+     "ease": "inOut"
+    },
+    "exit": {
+     "preset": "fade",
+     "dur": 0.5
+    },
+    "props": {
+     "points": [
+      [
+       720,
+       760
+      ],
+      [
+       840,
+       650
+      ],
+      [
+       950,
+       570
+      ]
+     ],
+     "color": "#60a5fa",
+     "width": 5,
+     "curve": 0.9
+    }
+   },
+   {
+    "id": "i1",
+    "type": "icon",
+    "start": 4.0,
+    "end": 8.5,
+    "x": 130,
+    "y": 540,
+    "z": 20,
+    "enter": {
+     "preset": "pop",
+     "dur": 0.6
+    },
+    "exit": {
+     "preset": "fade",
+     "dur": 0.4
+    },
+    "props": {
+     "name": "bolt",
+     "size": 150,
+     "color": "#f5c451",
+     "fill": true,
+     "glow": {
+      "color": "#f5c451",
+      "blur": 22,
+      "opacity": 0.8
+     }
+    }
+   },
+   {
+    "id": "i2",
+    "type": "icon",
+    "start": 4.2,
+    "end": 8.5,
+    "x": 950,
+    "y": 550,
+    "z": 20,
+    "enter": {
+     "preset": "pop",
+     "dur": 0.6
+    },
+    "exit": {
+     "preset": "fade",
+     "dur": 0.4
+    },
+    "props": {
+     "name": "globe",
+     "size": 150,
+     "color": "#93c5fd",
+     "glow": {
+      "color": "#3b82f6",
+      "blur": 22,
+      "opacity": 0.8
+     }
+    }
+   },
+   {
+    "id": "t_connect",
+    "type": "text",
+    "start": 3.3,
+    "end": 5.9,
+    "x": 540,
+    "y": 330,
+    "z": 30,
+    "enter": {
+     "preset": "blurIn",
+     "dur": 0.6
+    },
+    "exit": {
+     "preset": "fade",
+     "dur": 0.4
+    },
+    "props": {
+     "text": "Connect",
+     "size": 120,
+     "weight": 800,
+     "font": "Montserrat",
+     "uppercase": true,
+     "gradient": [
+      "#93c5fd",
+      "#ffffff"
+     ],
+     "glow": {
+      "color": "#3b82f6",
+      "blur": 26,
+      "opacity": 0.7
+     }
+    }
+   },
+   {
+    "id": "ring",
+    "type": "shape",
+    "start": 6.0,
+    "end": 9.6,
+    "x": 540,
+    "y": 1060,
+    "z": 6,
+    "enter": {
+     "preset": "scaleIn",
+     "dur": 0.6
+    },
+    "exit": {
+     "preset": "fade",
+     "dur": 0.5
+    },
+    "props": {
+     "shape": "ring",
+     "width": 820,
+     "height": 820,
+     "strokeWidth": 6,
+     "color": "#f5c451",
+     "glow": {
+      "color": "#f5c451",
+      "blur": 30,
+      "opacity": 0.9
+     },
+     "pulse": {
+      "period": 1.4,
+      "amount": 0.04
+     }
+    }
+   },
+   {
+    "id": "shield",
+    "type": "icon",
+    "start": 6.0,
+    "end": 9.6,
+    "x": 540,
+    "y": 1060,
+    "z": 25,
+    "enter": {
+     "preset": "draw",
+     "dur": 0.9
+    },
+    "exit": {
+     "preset": "fade",
+     "dur": 0.5
+    },
+    "props": {
+     "name": "shield",
+     "size": 380,
+     "color": "#f5c451",
+     "strokeWidth": 1.4,
+     "fill": true,
+     "fillOpacity": 0.22,
+     "glow": {
+      "color": "#f5c451",
+      "blur": 30,
+      "opacity": 0.9
+     }
+    }
+   },
+   {
+    "id": "burst",
+    "type": "particles",
+    "start": 6.4,
+    "end": 9,
+    "z": 26,
+    "props": {
+     "mode": "burst",
+     "count": 90,
+     "origin": [
+      540,
+      1060
+     ],
+     "speed": 520,
+     "life": 1.8,
+     "gravity": 240,
+     "size": [
+      4,
+      11
+     ],
+     "colors": [
+      "#f5c451",
+      "#ffffff",
+      "#60a5fa"
+     ],
+     "seed": 9
+    }
+   },
+   {
+    "id": "t_secure",
+    "type": "text",
+    "start": 6.0,
+    "end": 9.6,
+    "x": 540,
+    "y": 330,
+    "z": 30,
+    "enter": {
+     "preset": "blurIn",
+     "dur": 0.6
+    },
+    "exit": {
+     "preset": "fade",
+     "dur": 0.4
+    },
+    "props": {
+     "text": "Secure",
+     "size": 120,
+     "weight": 800,
+     "font": "Montserrat",
+     "uppercase": true,
+     "gradient": [
+      "#fde68a",
+      "#f5c451"
+     ],
+     "glow": {
+      "color": "#f5c451",
+      "blur": 26,
+      "opacity": 0.6
+     }
+    }
+   },
+   {
+    "id": "flash",
+    "type": "transition",
+    "start": 9.4,
+    "end": 9.9,
+    "z": 90,
+    "props": {
+     "kind": "flash",
+     "color": "#ffffff"
+    }
+   },
+   {
+    "id": "counter",
+    "type": "counter",
+    "start": 9.9,
+    "end": 12,
+    "x": 540,
+    "y": 330,
+    "z": 30,
+    "enter": {
+     "preset": "slideUp",
+     "dur": 0.6
+    },
+    "props": {
+     "from": 0,
+     "to": 2400000,
+     "suffix": "+",
+     "size": 150,
+     "weight": 800,
+     "font": "Outfit",
+     "gradient": [
+      "#ffffff",
+      "#93c5fd"
+     ],
+     "countDur": 1.4,
+     "plate": {
+      "color": "#050b1f",
+      "opacity": 0.65,
+      "blur": 8
+     }
+    }
+   },
+   {
+    "id": "cap",
+    "type": "text",
+    "start": 10.1,
+    "end": 12,
+    "x": 540,
+    "y": 470,
+    "z": 30,
+    "enter": {
+     "preset": "fade",
+     "dur": 0.5
+    },
+    "props": {
+     "text": "people trust us every day",
+     "size": 54,
+     "weight": 500,
+     "font": "Inter",
+     "color": "#cbd5e1",
+     "plate": {
+      "color": "#050b1f",
+      "opacity": 0.6
+     }
+    }
+   },
+   {
+    "id": "logo",
+    "type": "image",
+    "start": 10.3,
+    "end": 12,
+    "x": 540,
+    "y": 1150,
+    "z": 40,
+    "enter": {
+     "preset": "pop",
+     "dur": 0.7
+    },
+    "props": {
+     "asset": "logo.png",
+     "width": 340,
+     "glow": {
+      "color": "#f5c451",
+      "blur": 30,
+      "opacity": 0.6
+     }
+    }
+   }
+  ],
+  "aspect": "9:16"
+ },
+ "audio": [
+  {
+   "role": "sfx",
+   "sfx": "whoosh",
+   "start": 1.0,
+   "volume": 0.5
+  },
+  {
+   "role": "sfx",
+   "sfx": "swoosh_up",
+   "start": 3.3,
+   "volume": 0.45
+  },
+  {
+   "role": "sfx",
+   "sfx": "pop",
+   "start": 4.0,
+   "volume": 0.5
+  },
+  {
+   "role": "sfx",
+   "sfx": "riser",
+   "start": 4.6,
+   "volume": 0.4
+  },
+  {
+   "role": "sfx",
+   "sfx": "shimmer",
+   "start": 6.0,
+   "volume": 0.45
+  },
+  {
+   "role": "sfx",
+   "sfx": "hit",
+   "start": 9.4,
+   "volume": 0.6
+  },
+  {
+   "role": "sfx",
+   "sfx": "pop",
+   "start": 10.3,
+   "volume": 0.5
+  }
+ ],
+ "notes": "Phone is animated as a flat picture with depth and light, not rotated in 3D."
+}
