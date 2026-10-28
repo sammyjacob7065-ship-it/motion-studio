@@ -15,6 +15,9 @@ jobs:
   render:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: motion-studio
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +39,7 @@ jobs:
         run: pip install -r pipeline/requirements.txt
 
       - name: Engine packages and browser
-        working-directory: engine
+        working-directory: motion-studio/engine
         run: |
           npm install --no-audit --no-fund
           npx remotion browser ensure
@@ -61,6 +64,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: job-${{ inputs.job_id }}
-          path: work/${{ inputs.job_id }}/timeline.json
+          path: motion-studio/work/${{ inputs.job_id }}/timeline.json
           if-no-files-found: ignore
           retention-days: 7
