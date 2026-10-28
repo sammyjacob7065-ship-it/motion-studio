@@ -46,7 +46,9 @@ jobs:
 
       - name: Python packages
         working-directory: ${{ env.ROOT }}
-        run: pip install -r pipeline/requirements.txt
+        run: |
+          pip install "requests>=2.31" "pillow>=10.0"
+          if [ -f pipeline/requirements.txt ]; then pip install -r pipeline/requirements.txt; fi
 
       - name: Engine packages and browser
         working-directory: ${{ env.ROOT }}/engine
