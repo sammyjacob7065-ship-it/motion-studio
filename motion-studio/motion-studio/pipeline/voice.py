@@ -41,8 +41,14 @@ def _speak(text, dest, voice, speed, base):
 _WAKE = {"done": False}
 
 
+def _setting(name, default):
+    """An unset GitHub secret arrives as an empty text: that counts as 'not set', whatever version of common.py is installed."""
+    v = str(os.environ.get(name) or "").strip()
+    return v or default
+
+
 def _base():
-    return env("TTS_URL", "https://openai-edge-tts-9mrp.onrender.com").rstrip("/")
+    return _setting("TTS_URL", "https://openai-edge-tts-9mrp.onrender.com").rstrip("/")
 
 
 def wake():
@@ -78,8 +84,8 @@ def generate(text, out_path, workdir):
     text = pronounce.apply(text)       # only the voice hears the sound-spellings of hard names
     _wait_awake()                      # the wake-up started at the beginning of the job
     base = _base()
-    voice = env("TTS_VOICE", "en-NG-AbeoNeural")
-    speed = float(env("TTS_SPEED", "1.0"))
+    voice = _setting("TTS_VOICE", "en-NG-AbeoNeural")
+    speed = float(_setting("TTS_SPEED", "1.0"))
     parts = []
     for i, c in enumerate(_chunks(text)):
         p = os.path.join(workdir, f"tts_{i}.mp3")
