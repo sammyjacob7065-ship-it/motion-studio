@@ -14,6 +14,7 @@ import assets as A  # noqa: E402
 import director  # noqa: E402
 import groq  # noqa: E402
 import mix  # noqa: E402
+import pronounce  # noqa: E402
 import render  # noqa: E402
 import timeline as T  # noqa: E402
 import voice  # noqa: E402
@@ -53,6 +54,7 @@ def fallback_words(text, dur):
 
 def main(job):
     store = Store()
+    voice.wake()                       # wake the free voice server now, while the director works
     brief = store.get_json(f"motion/jobs/{job}/brief.json")
     if not brief:
         raise SystemExit(f"No brief found for job {job}")
@@ -154,6 +156,8 @@ def main(job):
             voice_len = A.duration_of(voice_path)
             try:
                 words, _txt, _d = voice.words_for(voice_path)
+                if vo.get("mode") == "generate" and pronounce.LAST["changed"]:
+                    words = pronounce.fix_words_to_text(words, vo.get("text", ""))      # captions keep the real spelling of names
             except Exception as e:  # noqa: BLE001
                 words = fallback_words(vo.get("text", ""), voice_len)
                 notes.append("word timing guessed (speech check failed: " + str(e)[:60] + ")")
