@@ -6,9 +6,11 @@ S = requests.Session()
 
 
 def env(name, default=None, required=False):
-    v = os.environ.get(name, default)
+    v = os.environ.get(name)
     if isinstance(v, str):
         v = v.strip()
+    if v is None or v == "":      # an unset GitHub secret arrives as an empty text: treat it as "not set" and use the default
+        v = default
     if required and not v:
         raise RuntimeError(f"Missing setting {name}. Add it in GitHub: repo Settings > Secrets and variables > Actions.")
     return v
