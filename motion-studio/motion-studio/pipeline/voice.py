@@ -2,9 +2,11 @@
 import os
 import re
 import subprocess
+import threading
 import time
 from common import S, env
 import groq
+import pronounce
 
 
 def _chunks(text, limit=850):
@@ -36,8 +38,46 @@ def _speak(text, dest, voice, speed, base):
     raise RuntimeError("Voice server did not answer: " + last)
 
 
+_WAKE = {"done": False}
+
+
+def _base():
+    return env("TTS_URL", "https://openai-edge-tts-9mrp.onrender.com").rstrip("/")
+
+
+def wake():
+    """Wake the free voice server in the background at the START of the job (it sleeps when idle), so it is ready
+    by the time the voice is needed. Never blocks and never raises."""
+    base = _base()
+
+    def go():
+        for _ in range(40):
+            try:
+                r = S.get(base + "/v1/models", timeout=45)
+                if r.status_code < 500:
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(5)
+        _WAKE["done"] = True
+
+    try:
+        _WAKE["done"] = False
+        threading.Thread(target=go, daemon=True).start()
+    except Exception:  # noqa: BLE001
+        _WAKE["done"] = True
+
+
+def _wait_awake(limit=150):
+    t0 = time.time()
+    while not _WAKE["done"] and time.time() - t0 < limit:
+        time.sleep(1)
+
+
 def generate(text, out_path, workdir):
-    base = env("TTS_URL", "https://openai-edge-tts-9mrp.onrender.com").rstrip("/")
+    text = pronounce.apply(text)       # only the voice hears the sound-spellings of hard names
+    _wait_awake()                      # the wake-up started at the beginning of the job
+    base = _base()
     voice = env("TTS_VOICE", "en-NG-AbeoNeural")
     speed = float(env("TTS_SPEED", "1.0"))
     parts = []
