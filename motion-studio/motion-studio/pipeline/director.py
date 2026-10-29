@@ -199,6 +199,9 @@ def _layer_line(l):
                                                   l.get("x", ""), l.get("y", ""), l.get("z", ""), str(what).replace("\n", " / ")[:40])
 
 
+PART_HOOK = {"load": None, "save": None}     # set by run.py: saves each finished part so /resume does not redo it
+
+
 def _timeline_in_parts(user, prompt, plan_json, registry, words, voice_start, size, sfx_names, dur):
     """Write the video in 2-4 short parts (about 9 seconds each), one after another, so every request stays small.
     Part 1 also sets palette, background and camera. Each later part sees what is already on screen."""
@@ -229,7 +232,14 @@ def _timeline_in_parts(user, prompt, plan_json, registry, words, voice_start, si
         if k == n - 1:
             msg += f"- This is the LAST part: it must include the final reveal and the final frame must stay visible for at least 1.2 s, until {float(dur):.1f}s. Add the captions layer here only if it was not placed already.\n"
         tl = None
-        for attempt in range(2):
+        saved = None
+        try:
+            saved = PART_HOOK["load"](k) if PART_HOOK["load"] else None
+        except Exception:  # noqa: BLE001
+            saved = None
+        if saved and isinstance(saved.get("tl"), dict):
+            tl, au, nt = saved["tl"], saved.get("au"), saved.get("nt")
+        for attempt in range(0 if tl is not None else 2):
             ask = msg if attempt == 0 else msg + "- YOUR LAST ANSWER WAS CUT OFF OR INVALID. Answer again with a SHORTER part: at most 8 layers, no long descriptions, valid JSON only.\n"
             try:
                 ans = groq.chat([{"role": "system", "content": sysmsg}, {"role": "user", "content": ask}], temperature=0.45, max_tokens=4500, reasoning="low")
@@ -239,6 +249,11 @@ def _timeline_in_parts(user, prompt, plan_json, registry, words, voice_start, si
                 tl = None
         if tl is None:
             raise RuntimeError(f"The director's answer for part {k + 1} was not valid twice.")
+        if not saved and PART_HOOK["save"]:
+            try:
+                PART_HOOK["save"](k, {"tl": tl, "au": au, "nt": nt})
+            except Exception:  # noqa: BLE001
+                pass
         if k == 0:
             first_tl = {kk: vv for kk, vv in tl.items() if kk != "layers"}
         for l in tl.get("layers", []) or []:
