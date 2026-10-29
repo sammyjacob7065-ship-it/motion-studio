@@ -11,41 +11,72 @@ def _key():
     return env("GROQ_API_KEY", required=True)
 
 
+def _models(first):
+    """The model to try first, then backups with more room (the free plan of a model can be small: gpt-oss is 8,000 tokens per minute)."""
+    extra = [m.strip() for m in env("DIRECTOR_FALLBACKS", "openai/gpt-oss-20b,qwen/qwen3.8-27b").split(",") if m.strip()]
+    out = []
+    for m in [first] + extra:
+        if m and m not in out:
+            out.append(m)
+    return out
+
+
 def chat(messages, model=None, temperature=0.4, max_tokens=6000, json_mode=True, tries=5, reasoning=None):
-    """One chat call with patient retries (free-tier rate limits are normal)."""
-    model = model or env("DIRECTOR_MODEL", "openai/gpt-oss-120b")
-    body = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
-    if json_mode:
-        body["response_format"] = {"type": "json_object"}
-    if model.startswith("openai/gpt-oss"):
-        body["reasoning_effort"] = reasoning or env("DIRECTOR_REASONING", "medium")
+    """One chat call with patient retries (free-tier rate limits are normal).
+    If a model says the request is too big for its plan (413) or its daily tokens are used up, the next backup model is tried."""
+    first = model or env("DIRECTOR_MODEL", "openai/gpt-oss-120b")
     last = ""
-    for i in range(tries):
-        try:
-            r = S.post(CHAT_URL, headers={"Authorization": "Bearer " + _key(), "Content-Type": "application/json"}, data=json.dumps(body), timeout=180)
-        except Exception as e:  # noqa: BLE001
-            last = str(e)
-            time.sleep(4 * (i + 1))
-            continue
-        if r.status_code == 200:
+    models = _models(first) if not model or model == env("DIRECTOR_MODEL", "openai/gpt-oss-120b") else [model]
+    for mi, model in enumerate(models):
+        body = {"model": model, "messages": messages, "temperature": temperature,
+                "max_tokens": max_tokens if model.startswith("openai/gpt-oss") else min(max_tokens, 8000)}
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
+        if model.startswith("openai/gpt-oss"):
+            body["reasoning_effort"] = reasoning or env("DIRECTOR_REASONING", "medium")
+        switch = False
+        for i in range(tries):
             try:
-                return r.json()["choices"][0]["message"]["content"] or ""
-            except Exception:  # noqa: BLE001
-                last = "empty answer"
+                r = S.post(CHAT_URL, headers={"Authorization": "Bearer " + _key(), "Content-Type": "application/json"}, data=json.dumps({k: v for k, v in body.items() if k != "_shrunk"}), timeout=180)
+            except Exception as e:  # noqa: BLE001
+                last = str(e)
+                time.sleep(4 * (i + 1))
                 continue
-        last = f"{r.status_code} {r.text[:200]}"
-        if r.status_code == 429:
-            wait = 12.0
-            m = re.search(r"try again in ([0-9.]+)s", r.text)
-            if m:
-                wait = min(60.0, float(m.group(1)) + 1.5)
-            time.sleep(wait)
-        elif r.status_code >= 500:
-            time.sleep(5 * (i + 1))
-        elif r.status_code == 400 and json_mode and "json" in r.text.lower():
-            body.pop("response_format", None)  # some models cannot do json mode: retry plain
-        else:
-            break
+            if r.status_code == 200:
+                try:
+                    return r.json()["choices"][0]["message"]["content"] or ""
+                except Exception:  # noqa: BLE001
+                    last = "empty answer"
+                    continue
+            last = f"{r.status_code} {r.text[:200]}"
+            low = r.text.lower()
+            if r.status_code == 413:
+                m2 = re.search(r"Limit (\d+), Requested (\d+)", r.text)
+                if m2 and not body.get("_shrunk"):
+                    over = int(m2.group(2)) - int(m2.group(1))
+                    if 0 < over < body["max_tokens"] - 1000:          # the answer space counted too: ask for a shorter answer and try again
+                        body["max_tokens"] = body["max_tokens"] - over - 300
+                        body["_shrunk"] = True
+                        continue
+            if r.status_code == 413 or (r.status_code == 429 and ("per day" in low or "tpd" in low)) or r.status_code == 404 or "decommission" in low or "model_not_found" in low:
+                switch = True                      # this model cannot do this request: try the next one
+                break
+            if r.status_code == 429:
+                wait = 12.0
+                m = re.search(r"try again in ([0-9.]+)s", r.text)
+                if m:
+                    wait = min(60.0, float(m.group(1)) + 1.5)
+                time.sleep(wait)
+            elif r.status_code >= 500:
+                time.sleep(5 * (i + 1))
+            elif r.status_code == 400 and json_mode and "json" in low:
+                body.pop("response_format", None)  # some models cannot do json mode: retry plain
+            else:
+                break
+        if switch and mi < len(models) - 1:
+            print(f"::warning::{model} cannot take this request ({last[:90]}) - trying {models[mi + 1]}")
+            continue
+        break
     raise RuntimeError("Groq failed: " + last)
 
 
