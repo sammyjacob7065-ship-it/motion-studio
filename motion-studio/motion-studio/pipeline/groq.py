@@ -47,6 +47,18 @@ def _models(first):
 
 
 def chat(messages, model=None, temperature=0.4, max_tokens=6000, json_mode=True, tries=5, reasoning=None):
+    """Same as _chat_once, but when every model is out of room for this minute it rests a full minute and tries the whole list again (up to 3 rounds)."""
+    for rnd in range(3):
+        try:
+            return _chat_once(messages, model, temperature, max_tokens, json_mode, tries, reasoning)
+        except RuntimeError as e:
+            if "429" not in str(e) or rnd == 2:
+                raise
+            print(f"::warning::all Groq models are busy for this minute - resting 65 s (round {rnd + 1} of 3)")
+            time.sleep(65)
+
+
+def _chat_once(messages, model=None, temperature=0.4, max_tokens=6000, json_mode=True, tries=5, reasoning=None):
     """One chat call with patient retries (free-tier rate limits are normal).
     If a model says the request is too big for its plan (413) or its daily tokens are used up, the next backup model is tried."""
     first = model or env("DIRECTOR_MODEL", "openai/gpt-oss-120b")
@@ -91,6 +103,9 @@ def chat(messages, model=None, temperature=0.4, max_tokens=6000, json_mode=True,
                         continue
             if r.status_code == 413 or (r.status_code == 429 and ("per day" in low or "tpd" in low)) or r.status_code == 404 or "decommission" in low or "model_not_found" in low:
                 switch = True                      # this model cannot do this request: try the next one
+                break
+            if r.status_code == 429 and i >= 1 and mi < len(models) - 1:
+                switch = True                      # still no room after one rest: the next model has its own minute budget
                 break
             if r.status_code == 429:
                 wait = 12.0
