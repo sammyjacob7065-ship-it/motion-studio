@@ -7,8 +7,33 @@ CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 
 
+_KEY = {"i": 0}
+
+
+def _keys():
+    """GROQ_API_KEY, then the optional extra keys GROQ_API_KEY_2 ... GROQ_API_KEY_6 (empty ones are ignored)."""
+    out = []
+    for n in ("GROQ_API_KEY", "GROQ_API_KEY_2", "GROQ_API_KEY_3", "GROQ_API_KEY_4", "GROQ_API_KEY_5", "GROQ_API_KEY_6"):
+        v = env(n)
+        if v and v not in out:
+            out.append(v)
+    if not out:
+        env("GROQ_API_KEY", required=True)
+    return out
+
+
 def _key():
-    return env("GROQ_API_KEY", required=True)
+    ks = _keys()
+    return ks[_KEY["i"] % len(ks)]
+
+
+def _next_key():
+    """Move to the next key. True if there is another key to use."""
+    ks = _keys()
+    if len(ks) < 2:
+        return False
+    _KEY["i"] = (_KEY["i"] + 1) % len(ks)
+    return True
 
 
 def _models(first):
@@ -35,6 +60,7 @@ def chat(messages, model=None, temperature=0.4, max_tokens=6000, json_mode=True,
         if model.startswith("openai/gpt-oss"):
             body["reasoning_effort"] = reasoning or env("DIRECTOR_REASONING", "medium")
         switch = False
+        rot = 0
         for i in range(tries):
             try:
                 r = S.post(CHAT_URL, headers={"Authorization": "Bearer " + _key(), "Content-Type": "application/json"}, data=json.dumps({k: v for k, v in body.items() if k != "_shrunk"}), timeout=180)
@@ -44,12 +70,17 @@ def chat(messages, model=None, temperature=0.4, max_tokens=6000, json_mode=True,
                 continue
             if r.status_code == 200:
                 try:
-                    return r.json()["choices"][0]["message"]["content"] or ""
+                    out = r.json()["choices"][0]["message"]["content"] or ""
+                    _next_key()                    # spread the work: the next request uses the next key
+                    return out
                 except Exception:  # noqa: BLE001
                     last = "empty answer"
                     continue
             last = f"{r.status_code} {r.text[:200]}"
             low = r.text.lower()
+            if r.status_code == 429 and rot < len(_keys()) - 1 and _next_key():
+                rot += 1                           # this key has no room now (per minute or per day): use the next key at once
+                continue
             if r.status_code == 413:
                 m2 = re.search(r"Limit (\d+), Requested (\d+)", r.text)
                 if m2 and not body.get("_shrunk"):
@@ -105,9 +136,12 @@ def transcribe_words(path, language=None):
     for i in range(4):
         r = once()
         if r.status_code == 200:
+            _next_key()                            # spread the work over the keys
             j = r.json()
             words = [{"w": str(w.get("word", "")).strip(), "s": round(float(w.get("start", 0)), 3), "e": round(float(w.get("end", 0)), 3)} for w in j.get("words", []) if str(w.get("word", "")).strip()]
             return words, j.get("text", ""), float(j.get("duration") or 0)
         last = f"{r.status_code} {r.text[:150]}"
+        if r.status_code == 429 and _next_key():
+            continue                               # try the next key at once
         time.sleep(8 * (i + 1) if r.status_code == 429 else 3)
     raise RuntimeError("Whisper failed: " + last)
