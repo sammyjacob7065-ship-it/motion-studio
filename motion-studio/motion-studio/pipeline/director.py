@@ -73,7 +73,7 @@ PLAN_SYSTEM = """You are the planning assistant of a motion graphics studio. Rea
  "aspect": "9:16 | 16:9 | 1:1 | 4:5",
  "duration": number of seconds or null,
  "voiceover": {"mode": "supplied | generate | none", "text": "exact words to speak (only for generate)"},
- "stock": [{"id":"stock1","query":"search words","kind":"image|video","why":"short"}],
+ "stock": [{"id":"stock1","query":"2-4 plain words of what the photo shows","prompt":"one full sentence describing exactly the picture to make: subject, place, light, camera angle (photorealistic, no text)","phrase":"the exact words of the voice-over line it goes with","kind":"image","why":"short"}],
  "cutout": ["file names whose background should be removed"],
  "captions": true or false,
  "transcribe_videos": true or false,
@@ -83,7 +83,7 @@ Rules:
 - aspect: use what the brief says; otherwise follow the supplied video/pictures; otherwise 9:16 for social/mobile content and 16:9 for YouTube/website/TV content.
 - duration: the length the brief asks for; if not stated and a voice-over exists leave null; otherwise 12-20.
 - voiceover: "supplied" if an audio file that is a voice was supplied. If the brief states the exact words to be spoken, mode "generate" with EXACTLY those words (do not rewrite them). If the brief asks for a voice-over without giving words, write a clear script in simple English that fits the duration (about 2.4 words per second). If the brief does not mention a voice-over, mode "none".
-- stock: only when the brief asks you to find pictures/videos or needs imagery that was not supplied. Maximum 6. Search words must be concrete, in English.
+- stock: only when the brief asks you to find pictures/videos or needs imagery that was not supplied. Maximum 8. Each picture is made by an AI from your "prompt", so describe exactly what the voice-over line says at that moment (voice says good roads -> a tarred estate road with street lights, never a room). One picture per spoken idea. Never ask for music or sound as a picture. Keep Nigerian people and places when the brief is Nigerian.
 - cutout: only when the brief asks to remove a background, or a product picture has a plain background and must float in a scene.
 - captions: true if the brief asks for captions/subtitles, or a talking-person video is made for social media.
 - transcribe_videos: true if supplied videos contain speech that captions, quotes or timing will use.
@@ -91,11 +91,58 @@ Rules:
 Never invent requirements the client did not write."""
 
 
+def _repair_plan(plan, prompt):
+    """A weak or backup model sometimes writes a thin plan (one requirement, no voice, a few seconds). The brief itself is the
+    truth: take the length, the exact voice-over words, the stock-picture wishes and the instruction lines from the brief."""
+    import re
+    if not isinstance(plan, dict):
+        plan = {}
+    text = str(prompt or "")
+    # length stated in the brief ("30-second", "30 seconds", "30 sec")
+    stated = None
+    for mm in re.finditer(r"\b(\d{1,3})\s*[- ]?\s*(?:seconds?|secs?)\b", text, re.I):
+        stated = float(mm.group(1))
+        break
+    try:
+        dur = float(plan.get("duration") or 0)
+    except Exception:  # noqa: BLE001
+        dur = 0
+    if stated and (dur < stated * 0.8 or dur > stated * 1.5):
+        plan["duration"] = stated
+    # exact voice-over words in quotes after the word VOICE-OVER / VOICEOVER / NARRATION
+    vo = plan.get("voiceover") or {}
+    if not isinstance(vo, dict):
+        vo = {}
+    if vo.get("mode") != "supplied" and not str(vo.get("text") or "").strip():
+        q = re.search(r"(?:voice[- ]?over|narration|voice)[^\n\"\u201c]{0,120}[:\n]\s*[\"\u201c]([^\"\u201d]{20,2500})[\"\u201d]", text, re.I)
+        if q:
+            plan["voiceover"] = {"mode": "generate", "text": " ".join(q.group(1).split())}
+    # stock pictures the brief asks us to find
+    if not plan.get("stock"):
+        f = re.search(r"find\b[^.\n]{0,60}?\b(photos?|pictures?|images?|videos?|clips?)\b[^.\n]{0,40}?\bof\b\s+([^.\n]{10,400})", text, re.I)
+        if f:
+            parts = [p.strip(" ,;") for p in re.split(r",\s*(?:and\s+)?|\s+and\s+", f.group(2)) if len(p.strip(" ,;")) >= 4][:5]
+            plan["stock"] = [{"id": f"stock{i + 1}", "query": p, "kind": "image", "why": "asked in the brief"} for i, p in enumerate(parts)]
+    # instruction lines
+    reqs = [str(r) for r in (plan.get("requirements") or []) if str(r).strip()]
+    lines = [" ".join(l.split()) for l in text.splitlines() if len(" ".join(l.split())) >= 12]
+    if len(lines) >= 6 and len(reqs) < max(4, len(lines) // 3):
+        low = " ".join(reqs).lower()
+        for l in lines:
+            if l.lower()[:40] not in low and len(reqs) < 30:
+                reqs.append(l[:240])
+        plan["requirements"] = reqs
+    plan.setdefault("aspect", "9:16" if re.search(r"9\s*:\s*16|vertical", text, re.I) else "16:9")
+    if re.search(r"\b(captions?|subtitles?)\b", text, re.I):
+        plan["captions"] = True
+    return plan
+
+
 def plan(prompt, registry, urls_note=""):
     user = f"CLIENT BRIEF (verbatim):\n<<<\n{prompt}\n>>>\n\nSUPPLIED FILES:\n{asset_table(registry)}\n{urls_note}"
     for _ in range(3):
         try:
-            return groq.parse_json(groq.chat([{"role": "system", "content": PLAN_SYSTEM}, {"role": "user", "content": user}], temperature=0.3, max_tokens=4000, reasoning="medium"))
+            return _repair_plan(groq.parse_json(groq.chat([{"role": "system", "content": PLAN_SYSTEM}, {"role": "user", "content": user}], temperature=0.3, max_tokens=4000, reasoning="medium")), prompt)
         except Exception as e:  # noqa: BLE001
             err = e
     raise RuntimeError(f"Director could not plan: {err}")
@@ -120,7 +167,11 @@ def words_block(words, voice_start):
 
 def timeline(prompt, plan_json, registry, words, voice_start, size, sfx_names, min_duration=None, extra=""):
     W, H = size
-    dur = plan_json.get("duration") or min_duration or 14
+    try:
+        plan_dur = float(plan_json.get("duration") or 0)
+    except Exception:  # noqa: BLE001
+        plan_dur = 0.0
+    dur = max(plan_dur, (float(min_duration) + 1.2) if min_duration else 0.0) or 14      # never shorter than the voice-over
     reqs = "\n".join(f"{i + 1}. {r}" for i, r in enumerate(plan_json.get("requirements", [])))
     vo_end = (words[-1]["e"] + voice_start) if words else None
     user = (
@@ -249,12 +300,12 @@ def summarize_timeline(tl):
     return "\n".join(rows) + f"\ncamera keys: {len(tl.get('camera', []))}"
 
 
-def coverage(requirements, tl, audio, notes=""):
+def coverage(requirements, tl, audio, notes="", facts=""):
     """Ticks each requirement. Returns list of {requirement, status: done|simplified|missing, note}."""
     if not requirements:
         return []
-    sys_msg = 'You check a finished motion graphics timeline against the client requirements. Reply JSON only: {"results":[{"n":1,"status":"done|simplified|missing","note":"short, only if not done"}]}. "done" only if the timeline clearly does it.'
-    user = "REQUIREMENTS:\n" + "\n".join(f"{i + 1}. {r}" for i, r in enumerate(requirements)) + "\n\nTIMELINE:\n" + summarize_timeline(tl) + "\n\nAUDIO EVENTS:\n" + "\n".join(f"{a.get('role')} {a.get('sfx') or a.get('asset', '')} @{a.get('start', 0)}" for a in audio or []) + (f"\n\nDIRECTOR NOTES: {notes}" if notes else "")
+    sys_msg = 'You check a finished motion graphics timeline against the client requirements. Reply JSON only: {"results":[{"n":1,"status":"done|simplified|missing","note":"short, only if not done"}]}. "done" only if the timeline clearly does it, or if the studio facts say it was done.'
+    user = "REQUIREMENTS:\n" + "\n".join(f"{i + 1}. {r}" for i, r in enumerate(requirements)) + "\n\nTIMELINE:\n" + summarize_timeline(tl) + "\n\nAUDIO EVENTS:\n" + "\n".join(f"{a.get('role')} {a.get('sfx') or a.get('asset', '')} @{a.get('start', 0)}" for a in audio or []) + (f"\n\nDIRECTOR NOTES: {notes}" if notes else "") + (f"\n\nTHE STUDIO ALSO ADDED (count these as done): {facts}" if facts else "")
     try:
         res = groq.parse_json(groq.chat([{"role": "system", "content": sys_msg}, {"role": "user", "content": user}], temperature=0.1, max_tokens=2500, reasoning="low")).get("results", [])
     except Exception:  # noqa: BLE001
