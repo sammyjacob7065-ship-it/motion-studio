@@ -6,13 +6,16 @@ import base64
 import io
 import json
 import os
+import re
 import sys
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import assets as A  # noqa: E402
+import checker  # noqa: E402
 import director  # noqa: E402
 import groq  # noqa: E402
+import imagegen  # noqa: E402
 import mix  # noqa: E402
 import pronounce  # noqa: E402
 import render  # noqa: E402
@@ -116,14 +119,29 @@ def main(job):
             stage = "Getting pictures"
             mon.stage("stock")
             got = 0
-            for req in plan["stock"][:6]:
-                p, note = A.fetch_stock(req, adir, plan.get("aspect"))
-                if not p:
-                    notes.append(f"stock '{req.get('query')}': {note}")
+            spoken = str((plan.get("voiceover") or {}).get("text", "")) or str(brief.get("prompt", ""))
+            for req in plan["stock"][:8]:
+                if any(w in str(req.get("query", "")).lower() for w in ("music", "song", "audio", "sound effect", "soundtrack")):
                     continue
+                p, how = None, "stock picture"
+                if str(req.get("kind", "image")) != "video":
+                    said = str(req.get("phrase") or "")
+                    ai_prompt = str(req.get("prompt") or "").strip() or (str(req.get("query", "")) + (", " + said if said else ""))
+                    p, prov = imagegen.generate(ai_prompt, plan.get("aspect"), adir, re.sub(r"[^A-Za-z0-9_-]", "", str(req.get("id", "pic"))) or "pic")
+                    if p:
+                        how = f"AI picture ({prov})"
+                    else:
+                        notes.append(f"AI picture '{req.get('query')}': {prov[:160]}")
+                if not p:
+                    p, note = A.fetch_stock(req, adir, plan.get("aspect"))
+                    if not p:
+                        notes.append(f"stock '{req.get('query')}': {note}")
+                        continue
                 final, info, flags = A.analyze(p, work)
                 name = os.path.basename(final)
-                info["flags"], info["origin"] = flags, f"stock picture for: {req.get('query')}"
+                info["flags"], info["origin"] = flags, f"{how} for: {req.get('query')}"
+                info["query"] = str(req.get("query", ""))
+                info["phrase"] = str(req.get("phrase") or "") or checker.phrase_for(req.get("query", ""), spoken)
                 registry[name], paths[name] = info, final
                 got += 1
             mon.done_stage("stock", f"{got} of {len(plan['stock'])}")
@@ -192,6 +210,13 @@ def main(job):
             tl, warns = T.normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
             problems = warns + T.check_layout(tl, registry)
             dnotes = dn2 or dnotes
+
+        def sync_check(t, a):
+            if not voice_path:
+                return t, a, []
+            return checker.finalize(t, a, words, VOICE_START, registry)
+
+        tl, raw_audio, sync_lines = sync_check(tl, raw_audio)
         mon.done_stage("timeline", f"{len(tl['layers'])} layers, {tl['duration']:.1f}s")
 
         def fill_captions(t):
@@ -227,7 +252,7 @@ def main(job):
                         raw_tl.setdefault("aspect", plan.get("aspect", "9:16"))
                         tl2, warns2 = T.normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
                         if not T.check_layout(tl2, registry) and len(tl2["layers"]) >= max(3, len(tl["layers"]) // 2):
-                            tl = tl2
+                            tl, raw_audio, sync_lines = sync_check(tl2, raw_audio)
                             fill_captions(tl)
                             dnotes = dn3 or dnotes
                     mon.done_stage("review", "clean" if not major else f"{len(major)} fixed")
@@ -286,7 +311,10 @@ def main(job):
         store.upload_file(f"motion/jobs/{job}/final.mp4", final, "video/mp4")
         store.put_json(f"motion/jobs/{job}/timeline.json", {"timeline": tl, "audio": raw_audio, "plan": plan})
         url = store.signed_url(f"motion/jobs/{job}/final.mp4")
-        cov = director.coverage(plan.get("requirements", []), tl, raw_audio, dnotes)
+        facts = ""
+        if voice_path:
+            facts = f"A voice-over of {voice_len:.0f} seconds was generated with a male Nigerian voice and mixed into the video. It reads: " + str((plan.get("voiceover") or {}).get("text", ""))[:600] + ". Captions: " + ("a captions layer follows the voice." if any(l["type"] == "captions" for l in tl["layers"]) else "none.") + " Sound effects were mixed in at the audio events."
+        cov = director.coverage(plan.get("requirements", []), tl, raw_audio, dnotes, facts)
         done = [c for c in cov if c["status"] == "done"]
         lines = [f"✅ Your video is ready ({tl['width']}x{tl['height']}, {tl['duration']:.0f}s)."]
         if cov:
@@ -294,6 +322,8 @@ def main(job):
             for c in cov:
                 if c["status"] != "done":
                     lines.append(f"• {c['status']}: {c['requirement'][:90]}" + (f" ({c['note'][:90]})" if c.get("note") else ""))
+        if sync_lines:
+            lines.append("Synced to the voice: " + "; ".join(sync_lines)[:350])
         if dnotes:
             lines.append("Note: " + str(dnotes)[:300])
         size_mb = os.path.getsize(final) / 1e6
