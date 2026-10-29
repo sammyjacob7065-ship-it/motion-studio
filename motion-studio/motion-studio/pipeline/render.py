@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+from common import env
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENGINE = os.path.join(ROOT, "engine")
@@ -24,10 +25,12 @@ def prepare(timeline, asset_paths, work):
         used.add(bg)
     for name in used:
         shutil.copy(asset_paths[name], os.path.join(dest, name))
-    tp = os.path.join(work, "timeline.json")
-    with open(tp, "w", encoding="utf-8") as f:
+    with open(os.path.join(work, "timeline.json"), "w", encoding="utf-8") as f:      # the plain timeline (kept for debugging)
         json.dump(timeline, f)
-    return os.path.abspath(tp)
+    pp = os.path.join(work, "props.json")
+    with open(pp, "w", encoding="utf-8") as f:                                         # what Remotion gets: the timeline INSIDE the props
+        json.dump({"timeline": timeline}, f)
+    return os.path.abspath(pp)
 
 
 def _run(cmd, on_line=None, timeout=3 * 3600):
@@ -43,7 +46,7 @@ def _run(cmd, on_line=None, timeout=3 * 3600):
 
 
 def render_video(timeline, props_path, out_path, on_progress=None):
-    conc = os.environ.get("RENDER_CONCURRENCY", "4")
+    conc = env("RENDER_CONCURRENCY", "4")
     cmd = ["npx", "remotion", "render", "src/index.ts", "Main", os.path.abspath(out_path), f"--props={props_path}", "--codec=h264", "--crf=18", "--muted", f"--concurrency={conc}", "--log=info"]
 
     def on_line(line):
