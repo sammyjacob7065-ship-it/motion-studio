@@ -10,6 +10,7 @@ Three kinds of calls, each separate so they can be tuned or swapped for a strong
 import json
 import os
 import groq
+from common import env
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIR = os.path.join(os.path.dirname(HERE), "director")
@@ -20,9 +21,21 @@ def _read(p):
         return f.read()
 
 
-def system_prompt():
+def system_prompt(example=True):
+    base = _read("system.md").replace("{{BLOCKS}}", _read("BLOCKS.md"))
+    if not example:                       # the short version used when the request must stay small
+        return base.split("# Example")[0].rstrip() + "\n"
     ex = json.load(open(os.path.join(DIR, "examples", "fintech.json"), encoding="utf-8"))
-    return _read("system.md").replace("{{BLOCKS}}", _read("BLOCKS.md")).replace("{{EXAMPLE}}", json.dumps(ex, separators=(",", ":")))
+    return base.replace("{{EXAMPLE}}", json.dumps(ex, separators=(",", ":")))
+
+
+def est_tokens(*texts):
+    """A safe over-estimate of how many tokens a request uses (JSON and code count heavier than plain words)."""
+    return int(sum(len(t) for t in texts) / 3.0)
+
+
+SMALL_REQUEST = 5500          # a request estimated above this many tokens is written in parts (the free Groq plan allows 8,000 per minute)
+PART_SECONDS = 9.0
 
 
 def asset_table(registry):
@@ -122,8 +135,77 @@ def timeline(prompt, plan_json, registry, words, voice_start, size, sfx_names, m
         f"CAPTIONS: {'add one captions layer (words_from voice)' if plan_json.get('captions') and words else 'only if the brief asks'}\n"
         f"SOUND EFFECTS AVAILABLE: {', '.join(sfx_names)}\n{extra}"
     )
+    if est_tokens(system_prompt(), user) > int(env("SMALL_REQUEST", str(SMALL_REQUEST))):
+        return _timeline_in_parts(user, prompt, plan_json, registry, words, voice_start, size, sfx_names, dur), user
     ans = groq.chat([{"role": "system", "content": system_prompt()}, {"role": "user", "content": user}], temperature=0.45, max_tokens=14000, reasoning="high")
     return _split(groq.parse_json(ans)), user
+
+
+def _layer_line(l):
+    p = l.get("props") or {}
+    what = p.get("text") or p.get("asset") or p.get("shape") or p.get("name") or p.get("mode") or ""
+    return "- %s %s %.1f-%.1fs x=%s y=%s z=%s %s" % (l.get("id", "?"), l.get("type", "?"), float(l.get("start", 0) or 0), float(l.get("end", 0) or 0),
+                                                  l.get("x", ""), l.get("y", ""), l.get("z", ""), str(what).replace("\n", " / ")[:40])
+
+
+def _timeline_in_parts(user, prompt, plan_json, registry, words, voice_start, size, sfx_names, dur):
+    """Write the video in 2-4 short parts (about 9 seconds each), one after another, so every request stays small.
+    Part 1 also sets palette, background and camera. Each later part sees what is already on screen."""
+    import math
+    n = max(2, int(math.ceil(float(dur) / PART_SECONDS)))
+    step = float(dur) / n
+    sysmsg = system_prompt(example=False)
+    head = user.split("VOICE-OVER WORD TIMES")[0]            # brief, requirements, concept, style, canvas, assets
+    tail_sfx = "SOUND EFFECTS AVAILABLE: " + ", ".join(sfx_names)
+    first_tl, layers, audio, notes = {}, [], [], []
+    seen = set()
+    for k in range(n):
+        t0, t1 = round(k * step, 2), round((k + 1) * step, 2) if k < n - 1 else round(float(dur), 2)
+        ws = [w for w in words if t0 - 0.6 <= w["s"] + voice_start < t1 + 1.0]
+        wtxt = words_block(ws, voice_start) if ws else "(no spoken words in this part)"
+        msg = (
+            head + f"VOICE-OVER WORD TIMES for this part (word@seconds):\n{wtxt}\n\n" + tail_sfx + "\n\n"
+            + f"YOU ARE WRITING PART {k + 1} OF {n}. The video is written in parts so every answer stays short. This part covers {t0:.1f}s to {t1:.1f}s of a {float(dur):.1f}s video.\n"
+            + f"- Output ONLY layers whose start is from {t0:.1f}s up to {t1:.1f}s (they may end later). Give every layer id the prefix p{k + 1}_ . Use the exact word times above to sync.\n"
+        )
+        if k == 0:
+            msg += (f"- ALSO output for the WHOLE video: aspect, fps, duration ({float(dur):.1f}), palette, background, and the camera keyframes from 0 to {float(dur):.1f}s.\n"
+                    '- Reply JSON: {"timeline": {"aspect":..,"fps":30,"duration":..,"palette":{..},"background":{..},"camera":[..],"layers":[..]}, "audio": [..], "notes": ".."}\n')
+        else:
+            msg += (f"- Do NOT output palette, background or camera: they are set. Palette: {json.dumps(first_tl.get('palette', {}))}. Background: {json.dumps(first_tl.get('background', {}))[:300]}.\n"
+                    '- Reply JSON: {"timeline": {"layers": [..]}, "audio": [..], "notes": ".."}\n'
+                    "- Already placed by earlier parts (continue the same look; do not repeat them; do not put text over their text):\n" + "\n".join(_layer_line(l) for l in layers[-40:]) + "\n")
+        if k == n - 1:
+            msg += f"- This is the LAST part: it must include the final reveal and the final frame must stay visible for at least 1.2 s, until {float(dur):.1f}s. Add the captions layer here only if it was not placed already.\n"
+        tl = None
+        for attempt in range(2):
+            ask = msg if attempt == 0 else msg + "- YOUR LAST ANSWER WAS CUT OFF OR INVALID. Answer again with a SHORTER part: at most 8 layers, no long descriptions, valid JSON only.\n"
+            try:
+                ans = groq.chat([{"role": "system", "content": sysmsg}, {"role": "user", "content": ask}], temperature=0.45, max_tokens=4500, reasoning="low")
+                tl, au, nt = _split(groq.parse_json(ans))
+                break
+            except ValueError:
+                tl = None
+        if tl is None:
+            raise RuntimeError(f"The director's answer for part {k + 1} was not valid twice.")
+        if k == 0:
+            first_tl = {kk: vv for kk, vv in tl.items() if kk != "layers"}
+        for l in tl.get("layers", []) or []:
+            if not isinstance(l, dict):
+                continue
+            lid = str(l.get("id") or f"p{k + 1}_{len(layers)}")
+            if lid in seen:
+                lid = f"{lid}_{k + 1}{len(layers)}"
+            l["id"] = lid
+            seen.add(lid)
+            layers.append(l)
+        audio += au or []
+        if nt:
+            notes.append(str(nt))
+    first_tl["layers"] = layers
+    first_tl.setdefault("duration", float(dur))
+    first_tl.setdefault("fps", 30)
+    return first_tl, audio, " ".join(notes)[:400]
 
 
 def _split(obj):
@@ -137,13 +219,15 @@ def repair(prev_tl, prev_audio, problems, original_user):
         + "\n\nPROBLEMS FOUND (fix them all, keep everything else exactly as it is, and still follow the brief):\n" + "\n".join("- " + p for p in problems)
         + "\n\nReply with the full corrected JSON object."
     )
+    if est_tokens(system_prompt(), msg) > int(env("SMALL_REQUEST", str(SMALL_REQUEST))) + 1500:
+        return prev_tl, prev_audio, "A fix round was skipped: the request was too big for the free Groq plan."
     ans = groq.chat([{"role": "system", "content": system_prompt()}, {"role": "user", "content": msg}], temperature=0.3, max_tokens=14000, reasoning="high")
     return _split(groq.parse_json(ans))
 
 
 def critique(images_b64, requirements, times):
     """Vision check of preview frames. Returns list of {severity, time, what, fix}."""
-    model = os.environ.get("VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+    model = env("VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
     content = [{"type": "text", "text": (
         "These are frames from a motion graphics video at times " + ", ".join(f"{t:.1f}s" for t in times) + ". "
         "Look only for problems a viewer would notice: text overlapping other text or objects, text that is cut off or too small to read, text with poor contrast, "
