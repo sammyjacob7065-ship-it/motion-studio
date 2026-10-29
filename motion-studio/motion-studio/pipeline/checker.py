@@ -1,0 +1,319 @@
+"""The sync checker and polish department.
+After the director has written the timeline, this module checks it against the real voice:
+  1. every text / price counter is moved to the second the voice says its words (the voice wins over the brief's seconds),
+  2. pictures, icons and shapes that belong to a text move with it,
+  3. every sound effect moves with the graphic it belongs to,
+  4. overlaps made by the moves are trimmed, picture changes get a flash, ambient dust and a slow camera push are added if missing.
+It never removes content and it never raises: if anything goes wrong the timeline is returned as it was."""
+import copy
+import math
+import re
+
+import timeline as T
+
+STOP = set("a an the and or to of in on at for from with is are was be your you our my it this that now wait every do not no we i me so as by up us can all".split())
+ONES = "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen".split()
+TENS = "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()
+
+
+GENERIC = set("modern beautiful luxury luxurious bright high quality photo photos picture pictures image images nice new good great big large front inside outside view views background stock professional real happy smiling".split())
+SYN = {
+    "house": "house houses home homes property properties duplex villa", "home": "home homes house houses property duplex villa",
+    "estate": "estate gated compound community secure security safe", "gated": "gated estate compound secure security safe gate",
+    "gate": "gate gated entrance estate", "entrance": "entrance gate gated estate",
+    "road": "road roads street streets drive", "street": "street streets road roads",
+    "light": "light lights electricity power lamp", "electricity": "electricity light lights power",
+    "water": "water borehole tap", "pool": "pool swimming", "swimming": "swimming pool",
+    "family": "family families children kids parents", "kitchen": "kitchen cooking", "garden": "garden gardens green lawn",
+    "price": "price prices cost naira million cheap affordable", "money": "money naira million pay payment installments",
+    "key": "key keys", "room": "room living lounge sitting bedroom", "city": "city lagos lekki", "lagos": "lagos lekki city",
+}
+
+
+def _groups(text):
+    """Keywords of a picture description as groups of words that mean the same (house = homes = property ...)."""
+    out = []
+    for t in _tok(text):
+        if t in STOP or t in GENERIC or len(t) < 3:
+            continue
+        stem = t[:-1] if t.endswith("s") and len(t) > 3 else t
+        out.append(tuple(sorted(set([t, stem] + SYN.get(stem, SYN.get(t, "")).split()))))
+    seen, uniq = set(), []
+    for g in out:
+        if g not in seen:
+            seen.add(g)
+            uniq.append(g)
+    return uniq[:6]
+
+
+def phrase_for(query, voice_text):
+    """The part of the voice-over a picture query is about (by keywords), or ''."""
+    groups = _groups(query)
+    if not groups:
+        return ""
+    best, best_score = "", 0
+    for ph in re.split(r"(?<=[.!?,;:])\s+", str(voice_text or "")):
+        toks = _tok(ph)
+        score = sum(1 for g in groups if any(_same(t, v) for t in toks for v in g))
+        if score > best_score:
+            best, best_score = ph.strip(), score
+    return best
+
+
+def _tok(s):
+    return [t for t in re.sub(r"[^a-z0-9 ]", " ", str(s).lower().replace("\n", " ")).split() if t]
+
+
+def _same(a, b):
+    return a == b or (len(a) >= 3 and len(b) >= 3 and (a.startswith(b) or b.startswith(a)))
+
+
+def _below_1000(n):
+    out = []
+    if n >= 100:
+        out += [ONES[n // 100], "hundred"]
+        n %= 100
+    if n >= 20:
+        out.append(TENS[n // 10])
+        n %= 10
+        if n:
+            out.append(ONES[n])
+    elif n > 0 or not out:
+        out.append(ONES[n])
+    return out
+
+
+def num_words(n):
+    """15000000 -> ['fifteen', 'million'] (what a voice says for a number)."""
+    n = int(n)
+    if n == 0:
+        return ["zero"]
+    out = []
+    for size, name in ((10 ** 9, "billion"), (10 ** 6, "million"), (1000, "thousand")):
+        if n >= size:
+            out += _below_1000(n // size) + [name]
+            n %= size
+    if n:
+        out += _below_1000(n)
+    return out
+
+
+def _spoken(words, voice_start):
+    return [(_tok(w["w"])[0] if _tok(w["w"]) else "", float(w["s"]) + voice_start, float(w["e"]) + voice_start) for w in words]
+
+
+def _find_trigger(sw, kws, old_start, need=None):
+    """Index of the spoken word where the voice starts saying these keywords (closest to the old start)."""
+    if not kws:
+        return None
+    kws = [(k,) if isinstance(k, str) else tuple(k) for k in kws]
+    need = need or max(1, math.ceil(0.6 * len(kws)))
+    best = None
+    for i in range(len(sw)):
+        if not sw[i][0] or not any(_same(sw[i][0], v) for g in kws for v in g):
+            continue
+        window = sw[i:i + len(kws) + 3]
+        got = {g for g in kws for t, _s, _e in window if t and any(_same(t, v) for v in g)}
+        if len(got) < need:
+            continue
+        score = (-len(got), abs(sw[i][1] - old_start))
+        if best is None or score < best[0]:
+            best = (score, i)
+    return best[1] if best else None
+
+
+def _shift(layer, d):
+    layer["start"] = round(max(0.0, layer["start"] + d), 3)
+    layer["end"] = round(layer["end"] + d, 3)
+    for name, keys in (layer.get("anim") or {}).items():
+        for k in keys:
+            try:
+                k[0] = round(float(k[0]) + d, 3)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _is_ambient(l, dur):
+    return l["type"] in ("particles", "captions", "transition") or (l["start"] <= 0.01 and l["end"] >= dur - 0.05)
+
+
+def _fullbleed(l, W):
+    return l["type"] == "image" and float((l.get("props") or {}).get("width") or 0) >= 0.9 * W
+
+
+def _warp(t, anchors):
+    """Where a moment of the old plan lands in the new one, from the matched anchors (old, new), moving smoothly between them."""
+    if not anchors:
+        return t
+    if t <= anchors[0][0]:
+        return t + (anchors[0][1] - anchors[0][0]) * (t / anchors[0][0] if anchors[0][0] > 0 else 1.0)
+    for (o0, n0), (o1, n1) in zip(anchors, anchors[1:]):
+        if t <= o1:
+            return n0 + (n1 - n0) * ((t - o0) / (o1 - o0) if o1 > o0 else 0.0)
+    return t + (anchors[-1][1] - anchors[-1][0])
+
+
+def sync(tl, audio, words, voice_start, assets):
+    report = []
+    if not words:
+        return tl, audio, report
+    dur, W = tl["duration"], tl["width"]
+    sw = _spoken(words, voice_start)
+    layers = tl["layers"]
+    old = {l["id"]: (l["start"], l["end"]) for l in layers}
+    new_start = {}                                   # matched layers: id -> the second the voice says them
+    # 1) text and counters follow the words
+    for l in layers:
+        if l["type"] not in ("text", "counter", "image") or _is_ambient(l, dur):
+            continue
+        p = l.get("props") or {}
+        if l["type"] == "image":
+            info = (assets or {}).get(p.get("asset"), {}) or {}
+            said = info.get("phrase") or info.get("query") or ""
+            groups = _groups(said)
+            i = _find_trigger(sw, groups, l["start"], (1 if len(groups) <= 2 else None))
+            if i is not None:
+                new_start[l["id"]] = (max(0.0, sw[i][1] - 0.3), f"picture '{str(info.get('query') or said)[:24]}'", sw[i])
+            continue
+        if l["type"] == "counter":
+            try:
+                kws = num_words(float(p.get("to", 0)))
+            except Exception:  # noqa: BLE001
+                kws = []
+            lead, need, label = 0.55, 1, f"{p.get('prefix', '')}{p.get('to', '')}{p.get('suffix', '')}"
+        else:
+            kws = [t for t in _tok(p.get("text", "")) if t not in STOP][:6]
+            lead, need, label = 0.25, (1 if len(kws) <= 2 else None), str(p.get("text", "")).replace("\n", " ")
+        i = _find_trigger(sw, kws, l["start"], need)
+        if i is None:
+            continue
+        new_start[l["id"]] = (max(0.0, sw[i][1] - lead), label, sw[i])
+    # anchors for the smooth time map (must keep the order of events)
+    anchors, last_new = [], -1.0
+    for o, n in sorted((old[k][0], v[0]) for k, v in new_start.items()):
+        if n >= last_new - 0.05 and (not anchors or o > anchors[-1][0]):
+            anchors.append((o, n))
+            last_new = n
+    delta = {}
+    for l in layers:
+        if _is_ambient(l, dur):
+            continue
+        o = old[l["id"]][0]
+        if l["id"] in new_start:
+            d = new_start[l["id"]][0] - o
+        else:
+            near = [(abs(ao - o), an - ao) for ao, an in anchors if abs(ao - o) <= (1.6 if l["type"] not in ("text", "counter") else 1.2)]
+            d = min(near)[1] if near else _warp(o, anchors) - o
+        if abs(d) >= 0.08:
+            delta[l["id"]] = d
+    for l in layers:
+        if l["id"] in delta:
+            _shift(l, delta[l["id"]])
+            l["end"] = round(min(dur, l["end"]), 3)
+            if l["end"] <= l["start"] + 0.3:
+                l["end"] = round(min(dur, l["start"] + 1.5), 3)
+    for k, (n, label, w) in new_start.items():
+        d = n - old[k][0]
+        if abs(d) >= 0.12:
+            report.append((abs(d), f"'{label[:28]}' {old[k][0]:.1f}s -> {n:.1f}s (voice says \"{w[0]}\" at {w[1]:.1f}s)"))
+    # 3) picture sequence: no gaps, no long overlaps
+    pics = sorted([l for l in layers if _fullbleed(l, W) and not _is_ambient(l, dur)], key=lambda x: x["start"])
+    for a, b in zip(pics, pics[1:]):
+        a["end"] = round(min(dur, max(a["start"] + 0.5, b["start"] + 0.3)), 3)
+    # 4) sound effects follow their graphic (or the time map)
+    moved_audio = 0
+    for a in audio or []:
+        try:
+            s0 = float(a.get("start", 0))
+        except Exception:  # noqa: BLE001
+            continue
+        cands = [(abs(old[l["id"]][0] - s0), l) for l in layers if l["id"] in old and l["type"] in ("text", "counter", "image", "icon", "shape") and not _is_ambient(l, dur)]
+        cands = [c for c in cands if c[0] <= 0.9]
+        if cands:
+            l = min(cands, key=lambda c: c[0])[1]
+            d = l["start"] - old[l["id"]][0]
+        else:
+            d = _warp(s0, anchors) - s0
+        if abs(d) >= 0.08:
+            a["start"] = round(max(0.0, s0 + d), 3)
+            moved_audio += 1
+    # 5) overlaps made by the moves (text that did not overlap before)
+    boxes = []
+    for l in layers:
+        if l["type"] in ("text", "counter"):
+            b = T._box(l, tl["width"], tl["height"], assets)
+            if b is not None:
+                boxes.append((l, b))
+    for i in range(len(boxes)):
+        for j in range(i + 1, len(boxes)):
+            (la, ba), (lb, bb) = boxes[i], boxes[j]
+            if la["start"] > lb["start"]:
+                la, lb, ba, bb = lb, la, bb, ba
+            if min(la["end"], lb["end"]) - max(la["start"], lb["start"]) < 0.2:
+                continue
+            oa, ob = old[la["id"]], old[lb["id"]]
+            if min(oa[1], ob[1]) - max(oa[0], ob[0]) >= 0.2:
+                continue                              # they already overlapped in the director's plan: not caused by the moves
+            small = min((ba[2] - ba[0]) * (ba[3] - ba[1]), (bb[2] - bb[0]) * (bb[3] - bb[1])) or 1
+            if T._inter(ba, bb) / small > 0.18 and lb["start"] + 0.05 >= la["start"] + 0.5:
+                la["end"] = round(lb["start"] + 0.05, 3)
+    # 6) the video ends when the voice is done (plus a short hold), not long after
+    voice_end = sw[-1][2]
+    target = round(voice_end + 2.0, 2)
+    if tl["duration"] > target + 2.5:
+        old_dur = tl["duration"]
+        content_end = max([l["end"] for l in layers if not _is_ambient(l, dur)] or [0.0])
+        tl["duration"] = target
+        for l in layers:
+            if l["end"] >= content_end - 0.01 or l["end"] >= old_dur - 0.05:
+                l["end"] = target
+            l["end"] = round(min(target, l["end"]), 3)
+            l["start"] = round(min(l["start"], target - 0.2), 3)
+        tl["camera"] = [[min(k[0], target)] + list(k[1:]) for k in (tl.get("camera") or [])]
+        report.append((0.0, f"the voice finishes at {voice_end:.1f}s, so the video now ends at {target:.1f}s (was {old_dur:.0f}s)"))
+    report.sort(reverse=True)
+    lines = [r[1] for r in report[:5]]
+    if delta or moved_audio:
+        lines.insert(0, f"{len(delta)} graphics and {moved_audio} sounds were moved to match the voice")
+    return tl, audio, lines
+
+
+def polish(tl):
+    """Small safe touches that make the video livelier. Only adds; never removes."""
+    dur, W, H = tl["duration"], tl["width"], tl["height"]
+    layers = tl["layers"]
+    added = []
+    acc = (tl.get("palette") or {}).get("accent", "#f5c451")
+    if not any(l["type"] == "particles" for l in layers):
+        layers.append({"id": "auto_dust", "type": "particles", "start": 0.0, "end": dur, "x": W / 2, "y": H / 2, "z": 2, "parallax": 0.5, "enter": None, "exit": None, "anim": {},
+                       "props": {"mode": "float", "count": 70, "area": [W, H], "colors": [acc, "#ffffff"], "size": [3, 8], "speed": 60, "life": 6, "direction": -90, "opacity": 0.5, "glow": True, "seed": 7}})
+        added.append("floating dust")
+    pics = sorted([l for l in layers if _fullbleed(l, W) and not _is_ambient(l, dur)], key=lambda x: x["start"])
+    trans = [l for l in layers if l["type"] == "transition"]
+    n = 0
+    for p in pics[1:]:
+        if any(abs(((t["start"] + t["end"]) / 2) - p["start"]) < 0.5 for t in trans):
+            continue
+        n += 1
+        layers.append({"id": f"auto_flash{n}", "type": "transition", "start": round(max(0.0, p["start"] - 0.12), 3), "end": round(min(dur, p["start"] + 0.28), 3), "x": W / 2, "y": H / 2, "z": 95,
+                       "parallax": 0, "enter": None, "exit": None, "anim": {}, "props": {"kind": "flash", "color": "#ffffff", "intensity": 0.5}})
+    if n:
+        added.append(f"{n} flash cut(s)")
+    if len(tl.get("camera") or []) < 3:
+        tl["camera"] = [[0.0, 1.0, 0, 0, 0, "inOutQuad"], [round(dur * 0.5, 2), 1.05, 20, -15, 0, "inOutQuad"], [round(dur, 2), 1.09, -20, -30, 0, "inOutQuad"]]
+        added.append("slow camera push")
+    return tl, added
+
+
+def finalize(tl, audio, words, voice_start, assets):
+    """Returns (timeline, audio, report lines). Any failure returns the inputs unchanged."""
+    keep_tl, keep_audio = copy.deepcopy(tl), copy.deepcopy(audio)
+    try:
+        tl, audio, lines = sync(tl, audio, words, voice_start, assets)
+        tl, added = polish(tl)
+        if added:
+            lines.append("added: " + ", ".join(added))
+        return tl, audio, lines
+    except Exception as e:  # noqa: BLE001
+        print("sync check skipped:", e)
+        return keep_tl, keep_audio, []
