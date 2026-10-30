@@ -139,6 +139,19 @@ def _simple(prompt):
     return first[:260].rstrip(" ,;.") + "."
 
 
+def _clean(b, path):
+    """Opens the bytes as a picture (raises when it is not one or too small), and saves a plain RGB JPEG."""
+    import io
+    from PIL import Image
+    im = Image.open(io.BytesIO(b))
+    im.load()
+    if min(im.size) < 256:
+        raise RuntimeError(f"picture too small ({im.size[0]}x{im.size[1]})")
+    im = im.convert("RGB")
+    im.thumbnail((2160, 2160))                          # very big pictures make the renderer slow and can time it out
+    im.save(path, "JPEG", quality=93)
+
+
 def generate(prompt, aspect, dest_dir, name, exact=False, rounds=3):
     """Tries the providers in order, and when all of them fail it rests and tries the whole chain again (up to 3 rounds, the last one with a simpler prompt),
     so a picture is not given up on after one bad moment. Returns (path, provider) or (None, 'why each failed')."""
@@ -159,9 +172,8 @@ def generate(prompt, aspect, dest_dir, name, exact=False, rounds=3):
                 continue
             try:
                 b = fn(text, aspect)
-                path = os.path.join(dest_dir, f"{name}.{_ext(b)}")
-                with open(path, "wb") as f:
-                    f.write(b)
+                path = os.path.join(dest_dir, f"{name}.jpg")
+                _clean(b, path)                                 # must really be a picture; saved as a clean JPEG the renderer can always open
                 return path, pname
             except Exception as e:  # noqa: BLE001
                 why = str(e)[:140]
