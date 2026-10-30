@@ -417,24 +417,53 @@ def watermark(tl, spec):
     """A brand name for the whole video. spec = 'NAME' or 'NAME | option | option' where an option is a position (top, bottom, top left, top right, bottom left,
     bottom right, centre), a size (small, medium, large), a colour (white, gold, navy, ... or #hex) or a strength (30%, 80%). Default: small, white, 50%, bottom centre.
     Returns True when added."""
-    parts = [x.strip() for x in re.split(r"[|;]", str(spec or "")) if x.strip()]
-    if not parts or any(l.get("id") == "watermark" for l in tl["layers"]):
+    raw = str(spec or "").strip()
+    if not raw or any(l.get("id") == "watermark" for l in tl["layers"]):
         return False
-    text = parts[0][:40]
     W, H, dur = tl["width"], tl["height"], tl["duration"]
+    # the brand name: in quotes, or the words before the first description word ("SAMSON_SET small white at the top right ..." -> SAMSON_SET)
+    q = re.search(r"[\"\u201c\u2018']([^\"\u201d\u2019']{1,40})[\"\u201d\u2019']", raw)
+    DESC = set("small medium large big tiny huge in at on of the with and a an to top bottom left right centre center middle corner letters text faint soft light subtle see-through transparent semi-transparent bold bright strong white black gold green navy blue red orange grey gray silver whole video throughout always show shown put placed placing for from is it as be".split())
+    if q:
+        text = q.group(1).strip()
+    elif "|" in raw or ";" in raw:
+        text = re.split(r"[|;]", raw)[0].strip()
+    else:
+        words, name = raw.split(), []
+        for w in words:
+            if w.lower().strip(",.") in DESC or re.fullmatch(r"#[0-9a-f]{6}|\d{1,3}\s*%", w.lower()):
+                break
+            name.append(w)
+        text = " ".join(name) or words[0]
+    text = text.strip(" ,.-:")[:40]
+    if not text:
+        return False
+    low = raw.lower().replace(text.lower(), " ", 1)
     pos, size, color, op = "bottom", 30, "#ffffff", 0.5
-    for o in (x.lower() for x in parts[1:]):
-        m = re.fullmatch(r"(\d{1,3})\s*%", o)
-        if m:
-            op = max(0.1, min(1.0, int(m.group(1)) / 100))
-        elif re.fullmatch(r"#[0-9a-f]{6}", o):
-            color = o
-        elif o in _COLORS:
-            color = _COLORS[o]
-        elif o in ("small", "medium", "large", "big"):
-            size = {"small": 30, "medium": 44, "large": 60, "big": 60}[o]
-        else:
-            pos = o
+    ypos = "top" if re.search(r"\btop\b|\bupper\b", low) else ("centre" if re.search(r"\b(centre|center|middle)\b", low) and not re.search(r"\b(top|bottom)\b", low) else "bottom")
+    xpos = "left" if re.search(r"\bleft\b", low) else ("right" if re.search(r"\bright\b", low) else "")
+    pos = (ypos + " " + xpos).strip()
+    if re.search(r"\b(large|big|huge|bold)\b", low):
+        size = 60
+    elif re.search(r"\bmedium\b", low):
+        size = 44
+    elif re.search(r"\b(small|tiny)\b", low):
+        size = 30
+    m = re.search(r"(\d{1,3})\s*%", low)
+    if m:
+        op = max(0.1, min(1.0, int(m.group(1)) / 100))
+    elif re.search(r"\b(faint|subtle|transparent|see-through|soft|light)\b", low):
+        op = 0.35
+    elif re.search(r"\b(strong|solid|bright|clear)\b", low):
+        op = 0.85
+    h = re.search(r"#[0-9a-f]{6}", low)
+    if h:
+        color = h.group(0)
+    else:
+        for k, v in _COLORS.items():
+            if re.search(r"\b" + k + r"\b", low):
+                color = v
+                break
     xs = W * 0.17 if "left" in pos else (W * 0.83 if "right" in pos else W / 2)
     ys = H * 0.06 if "top" in pos else (H * 0.5 if pos.startswith(("centre", "center", "middle")) else H * 0.94)
     if "left" in pos or "right" in pos:
