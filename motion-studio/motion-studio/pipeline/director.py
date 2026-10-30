@@ -255,7 +255,7 @@ def pictures_from_brief(text):
     return out[:12]
 
 
-def image_department(brief_text, plan, supplied_images):
+def image_department(brief_text, plan, supplied_images, have_video=False, has_music=False, dur_hint=None):
     """The picture department. When the client sent no (or few) pictures, it decides which pictures the video needs, one for each spoken idea,
     and writes the image prompt for each. Returns stock-style requests [{id, query, prompt, phrase, kind}] that the image makers fill."""
     import math
@@ -272,7 +272,33 @@ def image_department(brief_text, plan, supplied_images):
         return []                                              # the script wrote its own picture prompts: it controls the pictures
     have = len(plan.get("stock") or []) + supplied_images
     want = max(3, min(9, int(round(dur / 4.0))))
-    if not spoken or have >= 3:
+    if have_video or have >= 3:
+        return []                                              # a supplied video is the footage; enough pictures already
+    if not spoken:
+        # no voice-over: pictures are still made when a song was sent or the brief talks about pictures; they come from the brief itself
+        if not (has_music or re.search(r"\b(image|images|picture|pictures|photo|photos|scene|scenes|visual|visuals)\b", text, re.I)):
+            return []
+        d = float(dur_hint or dur or 24)
+        need = max(3, min(10, int(round(d / 3.0)))) - have
+        if need <= 0:
+            return []
+        context = " ".join((text + " " + str(plan.get("concept") or "")).split())[:600]
+        african = bool(re.search(r"nigeria|lagos|abuja|naira|ibadan|africa|ghana|kenya", text, re.I))
+        pics = []
+        try:
+            ans = groq.chat([{"role": "system", "content": "You are the picture editor of a professional advert studio. You write precise image prompts."},
+                             {"role": "user", "content": f"Brief: {context}\n\nWrite {need} different image prompts for a {int(d)}-second video with music, one picture per scene, in the order of the story of the brief. Each prompt is one sentence "
+                              "(subject, place, light, camera angle) and must show something the brief is about. No text, no logos." + (" People and places are African/Nigerian." if african else "") + '\nReply JSON only: {"pictures":[{"prompt":"photorealistic ..."}]}'}],
+                            temperature=0.5, max_tokens=1500, reasoning="low")
+            for it in (groq.parse_json(ans).get("pictures") or [])[:need]:
+                if isinstance(it, dict) and str(it.get("prompt") or "").strip():
+                    pics.append(str(it["prompt"]).strip()[:600])
+        except Exception as e:  # noqa: BLE001
+            print("picture department (no voice): simple way (", str(e)[:80], ")")
+        while len(pics) < need:
+            pics.append(f"Photorealistic cinematic photo, scene {len(pics) + 1} of {need}: {context[:200]}" + (" African setting." if african else ""))
+        return [{"id": f"auto{i + 1}", "query": " ".join(re.sub(r"[^A-Za-z0-9 ]", " ", p).split()[:5]) or "scene", "prompt": p, "phrase": "", "kind": "image", "why": "picture department"} for i, p in enumerate(pics[:need])]
+    if not spoken:
         return []
     need = want - have
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", spoken) if len(s.strip()) > 3]
