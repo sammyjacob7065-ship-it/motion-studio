@@ -132,11 +132,15 @@ def _horde(prompt, aspect, wait=420):
 PROVIDERS = [("agnes", _agnes), ("cloudflare", _cloudflare), ("horde", _horde)]
 
 
-def generate(prompt, aspect, dest_dir, name):
+def generate(prompt, aspect, dest_dir, name, exact=False):
     """Tries the providers in order. Returns (path, provider) or (None, 'why each failed')."""
     if env("IMAGE_AI", "1") == "0":
         return None, "AI pictures switched off"
-    prompt = str(prompt).strip() + (" Photorealistic, natural light, sharp, professional photo. No text, no watermark, no logo." if "photo" not in str(prompt).lower() else " No text, no watermark, no logo.")
+    prompt = str(prompt).strip()
+    if exact:                                               # the client's own image prompt: used as written
+        prompt += " No text, no watermark, no logo."
+    else:
+        prompt += (" Photorealistic, natural light, sharp, professional photo. No text, no watermark, no logo." if "photo" not in prompt.lower() else " No text, no watermark, no logo.")
     notes = []
     for pname, fn in PROVIDERS:
         if pname in _BLOCKED:
