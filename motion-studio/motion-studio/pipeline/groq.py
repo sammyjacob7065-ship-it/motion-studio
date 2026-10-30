@@ -126,6 +126,66 @@ def _chat_once(messages, model=None, temperature=0.4, max_tokens=6000, json_mode
     raise RuntimeError("Groq failed: " + last)
 
 
+_VIS = {"model": None, "done": False}
+
+
+def vision_model():
+    """A Groq model that can look at pictures. Tries VISION_MODEL first, then every model on the account that looks like a vision model; the first that answers a tiny picture test is used (cached). None when there is none."""
+    if _VIS["done"]:
+        return _VIS["model"]
+    _VIS["done"] = True
+    import base64
+    import io
+    try:
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (64, 64), (220, 30, 30)).save(buf, "JPEG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+    except Exception:  # noqa: BLE001
+        return None
+    cands = []
+    first = env("VISION_MODEL")
+    if first:
+        cands.append(first)
+    try:
+        r = S.get("https://api.groq.com/openai/v1/models", headers={"Authorization": "Bearer " + _key()}, timeout=30)
+        for m in r.json().get("data", []):
+            mid = str(m.get("id", ""))
+            if re.search(r"vision|scout|maverick|[-/]vl|llava|pixtral|gemma-?[34]|qwen3\.?\d*-?vl", mid, re.I) and not re.search(r"whisper|guard|tts|orpheus|embed", mid, re.I) and mid not in cands:
+                cands.append(mid)
+    except Exception:  # noqa: BLE001
+        pass
+    for mid in cands[:8]:
+        try:
+            r = S.post(CHAT_URL, headers={"Authorization": "Bearer " + _key(), "Content-Type": "application/json"}, timeout=60,
+                       data=json.dumps({"model": mid, "max_tokens": 8, "messages": [{"role": "user", "content": [{"type": "text", "text": "One word: the colour of this picture?"}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}}]}]}))
+            if r.status_code == 200:
+                _VIS["model"] = mid
+                break
+        except Exception:  # noqa: BLE001
+            continue
+    return _VIS["model"]
+
+
+def describe_frame(path, ask, model=None):
+    """One picture + a question to a Groq vision model. Returns the answer text (or '' when no vision model works)."""
+    import base64
+    m = model or vision_model()
+    if not m:
+        return ""
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    try:
+        r = S.post(CHAT_URL, headers={"Authorization": "Bearer " + _key(), "Content-Type": "application/json"}, timeout=90,
+                   data=json.dumps({"model": m, "max_tokens": 300, "temperature": 0.2, "messages": [{"role": "user", "content": [{"type": "text", "text": ask}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}}]}]}))
+        if r.status_code == 200:
+            _next_key()
+            return r.json()["choices"][0]["message"]["content"] or ""
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 def parse_json(text):
     """Pulls the first JSON object out of a model answer."""
     if not text:
