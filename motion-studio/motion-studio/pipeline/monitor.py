@@ -81,7 +81,8 @@ class Monitor:
         self._push({"state": "running", "stage": label, "pct": pct})
 
     def check_cancel(self):
-        if self.store.get_json(f"motion/jobs/{self.job}/cancel.json"):
+        flag = self.store.get_json(f"motion/jobs/{self.job}/cancel.json")
+        if flag and flag.get("cancel", True):
             self.state = "cancelled"
             self.write_status(state="cancelled", stage="Cancelled", message="Stopped by you")
             self.tg.send(f"🛑 Job {self.job} cancelled.")
@@ -99,7 +100,7 @@ class Monitor:
 
     def fail(self, stage, err):
         self.write_status(state="failed", stage=f"Failed at: {stage}", message=str(err)[:300])
-        self.tg.send(f"❌ Job {self.job} failed at: {stage}\n{str(err)[:500]}\n\nSend your prompt again, or /status. If this repeats, check the Actions log in the motion-studio repo.")
+        self.tg.send(f"❌ Job {self.job} failed at: {stage}\n{str(err)[:500]}\n\nFix the cause if it says what to fix, then send /resume to continue this job from where it stopped (the finished steps are saved). Or send your prompt again to start fresh. If it repeats, check the Actions log in the motion-studio repo.")
 
     def finish(self, url, note=""):
         self._line("deliver", "✅", "")
