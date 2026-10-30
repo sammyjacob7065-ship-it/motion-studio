@@ -128,4 +128,11 @@ def parse_json(text):
     a, b = t.find("{"), t.rfind("}")
     if a < 0 or b <= a:
         raise ValueError("no JSON in answer")
-    return json.loads(t[a:b + 1])
+    body = t[a:b + 1]
+    try:
+        return json.loads(body)
+    except ValueError:
+        fixed = re.sub(r",\s*([}\]])", r"\1", body)                         # trailing commas
+        fixed = re.sub(r"\}\s*\{", "},{", fixed)                            # two objects side by side
+        fixed = re.sub(r"\]\s*\[", "],[", fixed)
+        return json.loads(fixed)
