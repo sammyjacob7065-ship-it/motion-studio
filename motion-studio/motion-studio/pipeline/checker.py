@@ -379,6 +379,57 @@ def declutter(tl, assets):
     return moved
 
 
+def sound_design(tl, audio):
+    """Makes the sound track active: a counting sound while a number rolls (and a hit when it lands), a whoosh at every picture change,
+    a pop when a label appears, a shimmer on the last scene. Only adds a sound where the director put none close by."""
+    dur, W = tl["duration"], tl["width"]
+    layers = tl["layers"]
+    ev = [a for a in (audio or []) if isinstance(a, dict)]
+    added = {"counting": 0, "whoosh": 0, "pop": 0, "shimmer": 0}
+
+    def near(t, w=0.3, names=None):
+        for a in ev:
+            try:
+                if abs(float(a.get("start", 0)) - t) <= w and (names is None or a.get("sfx") in names):
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+
+    def add(name, t, vol, **kw):
+        ev.append({"role": "sfx", "sfx": name, "start": round(max(0.0, t), 3), "volume": vol, **kw})
+
+    for l in layers:
+        if l["type"] != "counter":
+            continue
+        p = l.get("props") or {}
+        d = float(p.get("countDur") or 1.6)
+        t0 = l["start"] + float(p.get("delay") or 0)
+        ev[:] = [a for a in ev if not (a.get("sfx") in ("tick", "click") and t0 - 0.2 <= float(a.get("start", -9)) <= t0 + d + 0.1)]   # one counting sound, not many single ticks
+        add("roll", t0, 0.45, dur=round(min(d + 0.1, 1.7), 2))
+        if not near(t0 + d, 0.3, ("hit",)):
+            add("hit", t0 + d, 0.7)
+        added["counting"] += 1
+    pics = sorted([l for l in layers if _fullbleed(l, W) and not _is_ambient(l, dur)], key=lambda x: x["start"])
+    for k, pic in enumerate(pics[1:], 1):
+        if not near(pic["start"] - 0.05, 0.35, ("whoosh", "swoosh_up", "hit", "riser")):
+            add("whoosh", pic["start"] - 0.05, 0.32)
+            added["whoosh"] += 1
+    for l in layers:
+        if l["type"] not in ("text", "icon", "shape") or _is_ambient(l, dur) or _fullbleed(l, W) or l["start"] < 0.2:
+            continue
+        if l["type"] == "shape" and float((l.get("props") or {}).get("width") or 0) < 120:
+            continue
+        if not near(l["start"], 0.3):
+            add("pop", l["start"], 0.35)
+            added["pop"] += 1
+    if len(pics) >= 2 and not near(pics[-1]["start"], 0.6, ("shimmer", "sparkle")):
+        add("shimmer", pics[-1]["start"] + 0.3, 0.4)
+        added["shimmer"] += 1
+    ev.sort(key=lambda a: float(a.get("start", 0)))
+    return ev, {k: v for k, v in added.items() if v}
+
+
 def polish(tl):
     """Small safe touches that make the video livelier. Only adds; never removes."""
     dur, W, H = tl["duration"], tl["width"], tl["height"]
@@ -414,6 +465,12 @@ def finalize(tl, audio, words, voice_start, assets):
         tl, added = polish(tl)
         if added:
             lines.append("added: " + ", ".join(added))
+        try:
+            audio, snd = sound_design(tl, audio)
+            if snd:
+                lines.append("sounds added: " + ", ".join(f"{k} x{v}" for k, v in snd.items()))
+        except Exception as e:  # noqa: BLE001
+            print("sound design skipped:", e)
         try:
             fixed = declutter(tl, assets)
             if fixed:
