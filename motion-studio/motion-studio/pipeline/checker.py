@@ -153,7 +153,30 @@ def _warp(t, anchors):
     return t + (anchors[-1][1] - anchors[-1][0])
 
 
-def sync(tl, audio, words, voice_start, assets):
+def _leave_with_picture(layers, W, dur):
+    """Every graphic leaves with the picture of its scene (the words of "24/7 SECURITY" must not stay after the gate picture is gone). Returns how many were cut short."""
+    pics = sorted([l for l in layers if _fullbleed(l, W) and not _is_ambient(l, dur)], key=lambda x: x["start"])
+    left = 0
+    if len(pics) >= 2:
+        for l in layers:
+            if l["type"] not in ("text", "counter", "icon", "shape", "line") or _is_ambient(l, dur) or _fullbleed(l, W):
+                continue
+            owner = None
+            for k, pic in enumerate(pics):
+                if pic["start"] - 0.05 <= l["start"] < (pics[k + 1]["start"] if k + 1 < len(pics) else 1e9):
+                    owner = k
+            if owner is None or owner >= len(pics) - 1:
+                continue                                   # before the first picture, or in the last scene (the logo / call to action stays)
+            wend = round(pics[owner + 1]["start"] + 0.15, 3)
+            if l["end"] > wend + 0.05:
+                l["end"] = max(wend, round(l["start"] + 0.8, 3))
+                if not l.get("exit"):
+                    l["exit"] = {"preset": "fade", "dur": 0.3}
+                left += 1
+    return left
+
+
+def sync(tl, audio, words, voice_start, assets, trim=True):
     report = []
     if not words:
         return tl, audio, report
@@ -220,24 +243,7 @@ def sync(tl, audio, words, voice_start, assets):
     pics = sorted([l for l in layers if _fullbleed(l, W) and not _is_ambient(l, dur)], key=lambda x: x["start"])
     for a, b in zip(pics, pics[1:]):
         a["end"] = round(min(dur, max(a["start"] + 0.5, b["start"] + 0.3)), 3)
-    # 3b) every graphic leaves with the picture of its scene (the words of "24/7 SECURITY" must not stay after the gate picture is gone)
-    left = 0
-    if len(pics) >= 2:
-        for l in layers:
-            if l["type"] not in ("text", "counter", "icon", "shape", "line") or _is_ambient(l, dur) or _fullbleed(l, W):
-                continue
-            owner = None
-            for k, pic in enumerate(pics):
-                if pic["start"] - 0.05 <= l["start"] < (pics[k + 1]["start"] if k + 1 < len(pics) else 1e9):
-                    owner = k
-            if owner is None or owner >= len(pics) - 1:
-                continue                                   # before the first picture, or in the last scene (the logo / call to action stays)
-            wend = round(pics[owner + 1]["start"] + 0.15, 3)
-            if l["end"] > wend + 0.05:
-                l["end"] = max(wend, round(l["start"] + 0.8, 3))
-                if not l.get("exit"):
-                    l["exit"] = {"preset": "fade", "dur": 0.3}
-                left += 1
+    left = _leave_with_picture(layers, W, dur)
     if left:
         report.append((0.0, f"{left} graphics now leave with their picture"))
     # 4) sound effects follow their graphic (or the time map)
@@ -280,7 +286,7 @@ def sync(tl, audio, words, voice_start, assets):
     # 6) the video ends when the voice is done (plus a short hold), not long after
     voice_end = sw[-1][2]
     target = round(voice_end + 2.0, 2)
-    if tl["duration"] > target + 2.5:
+    if trim and tl["duration"] > target + 2.5:
         old_dur = tl["duration"]
         content_end = max([l["end"] for l in layers if not _is_ambient(l, dur)] or [0.0])
         tl["duration"] = target
@@ -457,11 +463,101 @@ def polish(tl):
     return tl, added
 
 
-def finalize(tl, audio, words, voice_start, assets):
-    """Returns (timeline, audio, report lines). Any failure returns the inputs unchanged."""
+def beat_sync(tl, audio, info, assets=None):
+    """Music-driven video (no voice): pictures cut on the beat (about every 2 s or on every bar), the graphics of a scene move with their picture,
+    other graphics and sounds snap to the nearest beat. Returns report lines."""
+    W, dur = tl["width"], tl["duration"]
+    layers = tl["layers"]
+    beats = [b for b in info.get("beats", []) if b <= dur - 0.4]
+    period = float(info.get("period") or 0.5)
+    if len(beats) < 4:
+        return []
+    group = max(1, int(math.ceil(1.8 / period)))
+    if group > 1 and group % 2:
+        group += 1                                          # whole bars
+    grid = beats[::group]
+    pics = sorted([l for l in layers if _fullbleed(l, W) and not _is_ambient(l, dur)], key=lambda x: x["start"])
+    old_starts = [p["start"] for p in pics]
+    owner_of = {}
+    for l in layers:
+        if l["type"] in ("text", "counter", "icon", "shape", "line") and not _is_ambient(l, dur) and not _fullbleed(l, W):
+            for k, st in enumerate(old_starts):
+                if st - 0.05 <= l["start"] < (old_starts[k + 1] if k + 1 < len(old_starts) else 1e9):
+                    owner_of[l["id"]] = k
+    used, deltas, cut = set(), {}, 0
+    for k, pic in enumerate(pics):
+        if k == 0:
+            deltas[k] = 0.0
+            continue
+        cand = [g for g in grid if g not in used]
+        if not cand:
+            deltas[k] = 0.0
+            continue
+        g = min(cand, key=lambda x: abs(x - pic["start"]))
+        if abs(g - pic["start"]) <= max(1.2, group * period * 0.75):
+            used.add(g)
+            deltas[k] = g - pic["start"]
+            if abs(deltas[k]) >= 0.08:
+                cut += 1
+        else:
+            deltas[k] = 0.0
+    for k, pic in enumerate(pics):
+        d = deltas.get(k, 0.0)
+        if d:
+            pic["start"] = round(max(0.0, pic["start"] + d), 3)
+    for l in layers:
+        k = owner_of.get(l["id"])
+        d = deltas.get(k, 0.0) if k is not None else 0.0
+        if d:
+            _shift(l, d)
+    for a, b in zip(pics, pics[1:]):
+        a["end"] = round(min(dur, max(a["start"] + 0.5, b["start"] + 0.3)), 3)
+    snapped = 0
+    for l in layers:
+        if l["id"] in owner_of or l["type"] not in ("text", "counter", "icon", "shape", "line") or _is_ambient(l, dur) or _fullbleed(l, W) or l["start"] < 0.2:
+            continue
+        b = min(beats, key=lambda x: abs(x - l["start"]))
+        if 0.02 < abs(b - l["start"]) <= 0.25:
+            _shift(l, b - l["start"])
+            snapped += 1
+    for a in audio or []:
+        try:
+            s0 = float(a.get("start", 0))
+        except Exception:  # noqa: BLE001
+            continue
+        if a.get("role", "sfx") != "sfx":
+            continue
+        hooked = next((k for k, st in enumerate(old_starts) if abs(s0 - st) <= 0.35 and deltas.get(k)), None)
+        if hooked is not None:                              # a sound that belongs to a picture change moves with that picture
+            a["start"] = round(max(0.0, s0 + deltas[hooked]), 3)
+            continue
+        pool = (info.get("hits") or []) if a.get("sfx") in ("hit", "riser") else beats
+        if pool:
+            b = min(pool, key=lambda x: abs(x - s0))
+            if 0.02 < abs(b - s0) <= 0.2:
+                a["start"] = round(b, 3)
+    lines = []
+    if cut or snapped:
+        lines.append(f"{cut} picture cuts and {snapped} graphics were put on the beat ({info.get('bpm', 0):.0f} BPM)")
+    left = _leave_with_picture(layers, W, dur)
+    if left:
+        lines.append(f"{left} graphics now leave with their picture")
+    return lines
+
+
+def finalize(tl, audio, words, voice_start, assets, beat_info=None, trim=True):
+    """Returns (timeline, audio, report lines). Any failure returns the inputs unchanged.
+    words = what is spoken (voice-over or the talking video); beat_info = the beat of the music (used when nobody speaks)."""
     keep_tl, keep_audio = copy.deepcopy(tl), copy.deepcopy(audio)
     try:
-        tl, audio, lines = sync(tl, audio, words, voice_start, assets)
+        if words:
+            tl, audio, lines = sync(tl, audio, words, voice_start, assets, trim=trim)
+        elif beat_info:
+            lines = beat_sync(tl, audio, beat_info, assets)
+        else:
+            lines = []
+            if _leave_with_picture(tl["layers"], tl["width"], tl["duration"]):
+                lines.append("graphics now leave with their picture")
         tl, added = polish(tl)
         if added:
             lines.append("added: " + ", ".join(added))
