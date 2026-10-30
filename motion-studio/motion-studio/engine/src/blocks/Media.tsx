@@ -25,7 +25,7 @@ const Frame: React.FC<{ layer: Layer; ctx: Ctx; src: string; video?: boolean }> 
       <OffthreadVideo src={src} muted startFrom={Math.round((p.srcStart ?? 0) * ctx.fps)} playbackRate={p.playbackRate ?? 1} style={{ width: '100%', height: '100%', objectFit: fit }} />
     </Sequence>
   ) : (
-    <Img src={src} style={{ width: '100%', height: h ? '100%' : 'auto', objectFit: fit, display: 'block', transform: `scale(${kbScale}) translate(${kbX}px, ${kbY}px)` }} />
+    <Img src={src} onError={() => console.error('PICTURE FAILED TO LOAD: ' + src)} style={{ width: '100%', height: h ? '100%' : 'auto', objectFit: fit, display: 'block', transform: `scale(${kbScale}) translate(${kbX}px, ${kbY}px)` }} />
   );
   return (
     <div style={{ position: 'relative', width: w, height: h, filter: filters(p) }}>
