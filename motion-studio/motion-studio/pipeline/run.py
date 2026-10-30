@@ -146,6 +146,15 @@ def main(job):
                 raise RuntimeError("No answer after 30 minutes, job stopped. Send your prompt again when ready.")
 
         # ---- 3. stock pictures
+        pic_report = []
+        if _ck(store, job, "pictures") is None:
+            try:
+                auto = director.image_department(brief["prompt"], plan, len([1 for a in registry.values() if a.get("kind") == "image" and not a.get("alpha")]))
+                if auto:
+                    plan["stock"] = list(plan.get("stock") or []) + auto
+                    mon.note("stock", f"picture department: {len(auto)} pictures to make")
+            except Exception as e:  # noqa: BLE001
+                print("picture department skipped:", e)
         ck_stock = _ck(store, job, "pictures")
         if ck_stock is not None:
             for nm, info in (ck_stock.get("entries") or {}).items():
@@ -163,26 +172,29 @@ def main(job):
                 mon.stage("stock")
                 got = 0
                 spoken = str((plan.get("voiceover") or {}).get("text", "")) or str(brief.get("prompt", ""))
-                for req in plan["stock"][:8]:
+                for req in plan["stock"][:10]:
                     if any(w in str(req.get("query", "")).lower() for w in ("music", "song", "audio", "sound effect", "soundtrack")):
                         continue
                     p, how = None, "stock picture"
                     if str(req.get("kind", "image")) != "video":
                         said = str(req.get("phrase") or "")
                         ai_prompt = str(req.get("prompt") or "").strip() or (str(req.get("query", "")) + (", " + said if said else ""))
-                        p, prov = imagegen.generate(ai_prompt, plan.get("aspect"), adir, re.sub(r"[^A-Za-z0-9_-]", "", str(req.get("id", "pic"))) or "pic")
+                        p, prov = imagegen.generate(ai_prompt, plan.get("aspect"), adir, re.sub(r"[^A-Za-z0-9_-]", "", str(req.get("id", "pic"))) or "pic", exact=bool(req.get("exact")))
                         if p:
                             how = f"AI picture ({prov})"
                         else:
                             notes.append(f"AI picture '{req.get('query')}': {prov[:160]}")
+                            pic_report.append(f"{req.get('query')}: AI failed")
                     if not p:
                         p, note = A.fetch_stock(req, adir, plan.get("aspect"))
                         if not p:
                             notes.append(f"stock '{req.get('query')}': {note}")
+                            pic_report.append(f"{req.get('query')}: NO PICTURE")
                             continue
                     final, info, flags = A.analyze(p, work)
                     name = os.path.basename(final)
                     info["flags"], info["origin"] = flags, f"{how} for: {req.get('query')}"
+                    pic_report.append(how.replace("AI picture ", "").strip("()") if how != "stock picture" else "stock")
                     info["query"] = str(req.get("query", ""))
                     info["phrase"] = str(req.get("phrase") or "") or checker.phrase_for(req.get("query", ""), spoken)
                     registry[name], paths[name] = info, final
@@ -233,6 +245,16 @@ def main(job):
                 music_names = sup_music
             elif vo.get("mode") == "generate" and vo.get("text"):
                 voice_path = voice.generate(vo["text"], os.path.join(work, "voice.mp3"), work)
+            try:
+                want = float(plan.get("duration") or 0)
+                got = A.duration_of(voice_path)
+                if want >= 10 and got > want - 2.0:                    # the video must end when the brief says: speak a little faster
+                    fast = min(1.3, got / max(5.0, want - 2.0))
+                    if fast > 1.03:
+                        voice_path = voice.generate(vo["text"], os.path.join(work, "voice.mp3"), work, speed=round(fast, 2))
+                        notes.append(f"voice sped up x{fast:.2f} to fit {want:.0f} s" + (" (still longer: shorten the script a little)" if A.duration_of(voice_path) > want - 1.0 else ""))
+            except Exception as e:  # noqa: BLE001
+                print("voice speed fit skipped:", e)
                 music_names = [n for n in (sup_voice and [sup_voice] or []) + sup_music]
             else:
                 music_names = [n for n in registry if registry[n].get("kind") == "audio"]
@@ -405,6 +427,9 @@ def main(job):
             for c in cov:
                 if c["status"] != "done":
                     lines.append(f"• {c['status']}: {c['requirement'][:90]}" + (f" ({c['note'][:90]})" if c.get("note") else ""))
+        if pic_report:
+            ok = [x for x in pic_report if "NO PICTURE" not in x and "failed" not in x]
+            lines.append(f"Pictures: {len(ok)} of {len(pic_report)} made" + (" (" + ", ".join(sorted(set(ok))) + ")" if ok else "") + (". Problems: " + "; ".join(x for x in pic_report if x not in ok)[:200] if len(ok) < len(pic_report) else ""))
         if sync_lines:
             lines.append("Synced to the voice: " + "; ".join(sync_lines)[:350])
         if dnotes:
