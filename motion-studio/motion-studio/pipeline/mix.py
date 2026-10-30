@@ -7,6 +7,7 @@ SFX = {
     "swoosh_up": ("(random(0)*2-1)*pow(sin(PI*t/0.6),3)*0.6", 0.6, "highpass=f=700,lowpass=f=9000"),
     "pop": ("sin(2*PI*(600+900*exp(-t*40))*t)*exp(-t*30)*0.8", 0.18, ""),
     "click": ("(random(0)*2-1)*exp(-t*220)*0.8", 0.06, "highpass=f=1500"),
+    "roll": ("sin(2*PI*1800*t)*exp(-16*mod(30*(1-pow(2,-10*t/1.6)),1))*0.55", 1.7, ""),
     "tick": ("sin(2*PI*1800*t)*exp(-t*90)*0.7", 0.05, ""),
     "hit": ("sin(2*PI*(55+120*exp(-t*18))*t)*exp(-t*5)*0.9+(random(0)*2-1)*exp(-t*35)*0.35", 1.2, "lowpass=f=4000"),
     "riser": ("(sin(2*PI*(220+1400*t/1.8*t/1.8)*t)*0.35+(random(0)*2-1)*0.25)*(t/1.8)", 1.8, "lowpass=f=7000"),
