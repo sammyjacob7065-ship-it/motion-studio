@@ -1,0 +1,45 @@
+name: Read reference video
+
+on:
+  workflow_dispatch:
+    inputs:
+      chat_id:
+        description: "Telegram chat id"
+        required: true
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Python packages
+        run: |
+          F=$(find . -name requirements.txt -path "*pipeline*" | head -1)
+          pip install -r "$F"
+
+      - name: Read the reference
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_BUCKET: ${{ secrets.SUPABASE_BUCKET }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
+          GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODELS: ${{ secrets.GEMINI_MODELS }}
+          MOTION_TG_TOKEN: ${{ secrets.MOTION_TG_TOKEN }}
+          VISION_MODEL: ${{ secrets.VISION_MODEL }}
+        run: |
+          P=$(find . -name reference.py -path "*pipeline*" | head -1)
+          python "$P" "${{ inputs.chat_id }}"
