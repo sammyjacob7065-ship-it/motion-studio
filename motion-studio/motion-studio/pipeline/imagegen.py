@@ -2,6 +2,7 @@
 Agnes (4 keys, one after the other) -> Cloudflare FLUX -> AI Horde. Returns (path, provider) or (None, why)."""
 import base64
 import os
+import re
 import time
 
 import requests
@@ -15,7 +16,7 @@ except Exception:  # noqa: BLE001
 
 _BLOCKED = {}          # provider -> why (a dead key / used-up quota is skipped for the rest of the job)
 _START = {"i": 0}      # Agnes: each picture starts on a different key
-QUOTA = ("quota", "credit", "balance", "insufficient", "limit", "401", "402", "403", "unauthor", "daily", "exceeded")
+DEAD = ("quota exceeded", "out of credit", "no credit", "balance", "insufficient", "401", "402", "403", "unauthor", "invalid api key", "invalid token", "authentication", "daily")
 
 
 def _agnes_keys():
@@ -132,29 +133,42 @@ def _horde(prompt, aspect, wait=420):
 PROVIDERS = [("agnes", _agnes), ("cloudflare", _cloudflare), ("horde", _horde)]
 
 
-def generate(prompt, aspect, dest_dir, name, exact=False):
-    """Tries the providers in order. Returns (path, provider) or (None, 'why each failed')."""
+def _simple(prompt):
+    """A shorter, plainer version of the prompt for the last try (long prompts are sometimes refused or time out)."""
+    first = re.split(r"(?<=[.!?])\s+", str(prompt).strip())[0]
+    return first[:260].rstrip(" ,;.") + "."
+
+
+def generate(prompt, aspect, dest_dir, name, exact=False, rounds=3):
+    """Tries the providers in order, and when all of them fail it rests and tries the whole chain again (up to 3 rounds, the last one with a simpler prompt),
+    so a picture is not given up on after one bad moment. Returns (path, provider) or (None, 'why each failed')."""
     if env("IMAGE_AI", "1") == "0":
         return None, "AI pictures switched off"
-    prompt = str(prompt).strip()
-    if exact:                                               # the client's own image prompt: used as written
-        prompt += " No text, no watermark, no logo."
-    else:
-        prompt += (" Photorealistic, natural light, sharp, professional photo. No text, no watermark, no logo." if "photo" not in prompt.lower() else " No text, no watermark, no logo.")
+    base = str(prompt).strip()
     notes = []
-    for pname, fn in PROVIDERS:
-        if pname in _BLOCKED:
-            notes.append(f"{pname}: skipped ({_BLOCKED[pname]})")
-            continue
-        try:
-            b = fn(prompt, aspect)
-            path = os.path.join(dest_dir, f"{name}.{_ext(b)}")
-            with open(path, "wb") as f:
-                f.write(b)
-            return path, pname
-        except Exception as e:  # noqa: BLE001
-            why = str(e)[:140]
-            notes.append(f"{pname}: {why}")
-            if any(q in why.lower() for q in QUOTA) and pname != "horde":
-                _BLOCKED[pname] = why[:60]
-    return None, "; ".join(notes)
+    for rnd in range(rounds):
+        text = base if rnd < rounds - 1 else _simple(base)
+        if exact:                                               # the client's own image prompt: used as written
+            text += " No text, no watermark, no logo."
+        else:
+            text += (" Photorealistic, natural light, sharp, professional photo. No text, no watermark, no logo." if "photo" not in text.lower() else " No text, no watermark, no logo.")
+        for pname, fn in PROVIDERS:
+            until = _BLOCKED.get(pname)
+            if until and time.time() < until[0]:
+                notes.append(f"{pname}: skipped ({until[1]})")
+                continue
+            try:
+                b = fn(text, aspect)
+                path = os.path.join(dest_dir, f"{name}.{_ext(b)}")
+                with open(path, "wb") as f:
+                    f.write(b)
+                return path, pname
+            except Exception as e:  # noqa: BLE001
+                why = str(e)[:140]
+                notes.append(f"round {rnd + 1} {pname}: {why}")
+                if pname != "horde" and any(q in why.lower() for q in DEAD):
+                    _BLOCKED[pname] = (time.time() + 20 * 60, why[:60])      # a dead key / empty credit: skip for 20 minutes, then look again
+        if rnd < rounds - 1:
+            print(f"::warning::picture '{name}' failed on every provider - resting before round {rnd + 2}")
+            time.sleep(20 * (rnd + 1))
+    return None, "; ".join(notes[-6:])
