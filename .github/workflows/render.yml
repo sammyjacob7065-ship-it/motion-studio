@@ -44,6 +44,12 @@ jobs:
       - name: Python packages
         run: pip install requests pillow
 
+      - name: Remember the engine packages and browser (saves minutes)
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ROOT }}/engine/node_modules
+          key: engine-${{ runner.os }}-${{ hashFiles('**/engine/package.json') }}
+
       - name: Engine packages and browser
         working-directory: ${{ env.ROOT }}/engine
         run: |
@@ -66,6 +72,8 @@ jobs:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODELS: ${{ secrets.GEMINI_MODELS }}
           TTS_URL: ${{ secrets.TTS_URL }}
           TTS_VOICE: ${{ secrets.TTS_VOICE }}
           DIRECTOR_MODEL: ${{ secrets.DIRECTOR_MODEL }}
