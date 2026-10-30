@@ -385,6 +385,66 @@ def declutter(tl, assets):
     return moved
 
 
+def handoff(tl, assets=None):
+    """A label must be gone the moment the next label arrives. Labels in the top half are cut at the start of the next one (their plate / icon / line goes with them).
+    Returns a list of what was shortened."""
+    W, H, dur = tl["width"], tl["height"], tl["duration"]
+    layers = tl["layers"]
+    labels = sorted([l for l in layers if l["type"] in ("text", "counter") and l.get("id") != "watermark" and not _is_ambient(l, dur) and float(l.get("y", H / 2)) < H * 0.5], key=lambda x: x["start"])
+    done = []
+    for i, l in enumerate(labels):
+        nxt = [m for m in labels[i + 1:] if m["start"] > l["start"] + 0.3]
+        if not nxt:
+            continue
+        n = min(nxt, key=lambda x: x["start"])
+        if l["end"] <= n["start"] + 0.02:
+            continue
+        old = l["end"]
+        l["end"] = round(max(l["start"] + 0.5, n["start"]), 3)
+        for m in layers:
+            if m is l or m["type"] not in ("shape", "line", "icon") or _fullbleed(m, W) or _is_ambient(m, dur):
+                continue
+            if abs(m["start"] - l["start"]) < 0.5 and abs(m["end"] - old) < 0.6:
+                m["end"] = min(m["end"], l["end"])
+        done.append(f"{str((l.get('props') or {}).get('text', l['id']))[:22]} now leaves at {l['end']:.1f}s")
+    return done
+
+
+_COLORS = {"white": "#ffffff", "black": "#000000", "gold": "#f5c451", "green": "#1ed760", "navy": "#0a2a6b", "blue": "#2f7df6", "red": "#e5322d", "orange": "#ff8a00", "grey": "#bdbdbd", "gray": "#bdbdbd", "silver": "#c9c9c9"}
+
+
+def watermark(tl, spec):
+    """A brand name for the whole video. spec = 'NAME' or 'NAME | option | option' where an option is a position (top, bottom, top left, top right, bottom left,
+    bottom right, centre), a size (small, medium, large), a colour (white, gold, navy, ... or #hex) or a strength (30%, 80%). Default: small, white, 50%, bottom centre.
+    Returns True when added."""
+    parts = [x.strip() for x in re.split(r"[|;]", str(spec or "")) if x.strip()]
+    if not parts or any(l.get("id") == "watermark" for l in tl["layers"]):
+        return False
+    text = parts[0][:40]
+    W, H, dur = tl["width"], tl["height"], tl["duration"]
+    pos, size, color, op = "bottom", 30, "#ffffff", 0.5
+    for o in (x.lower() for x in parts[1:]):
+        m = re.fullmatch(r"(\d{1,3})\s*%", o)
+        if m:
+            op = max(0.1, min(1.0, int(m.group(1)) / 100))
+        elif re.fullmatch(r"#[0-9a-f]{6}", o):
+            color = o
+        elif o in _COLORS:
+            color = _COLORS[o]
+        elif o in ("small", "medium", "large", "big"):
+            size = {"small": 30, "medium": 44, "large": 60, "big": 60}[o]
+        else:
+            pos = o
+    xs = W * 0.17 if "left" in pos else (W * 0.83 if "right" in pos else W / 2)
+    ys = H * 0.06 if "top" in pos else (H * 0.5 if pos.startswith(("centre", "center", "middle")) else H * 0.94)
+    if "left" in pos or "right" in pos:
+        xs = W * (0.2 if "left" in pos else 0.8)
+    tl["layers"].append({"id": "watermark", "type": "text", "start": 0.0, "end": dur, "x": round(xs), "y": round(ys), "z": 99, "parallax": 0, "enter": None, "exit": None,
+                         "anim": {"opacity": [[0.0, op], [round(dur, 2), op]]},
+                         "props": {"text": text, "size": size, "weight": 600, "letterSpacing": 7, "color": color, "font": "Montserrat", "mode": "block", "shadow": {"y": 2, "blur": 6, "opacity": 0.6}}})
+    return True
+
+
 def sound_design(tl, audio):
     """Makes the sound track active: a counting sound while a number rolls (and a hit when it lands), a whoosh at every picture change,
     a pop when a label appears, a shimmer on the last scene. Only adds a sound where the director put none close by."""
