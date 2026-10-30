@@ -217,7 +217,7 @@ def main(job):
                     got += 1
                 mon.done_stage("stock", f"{got} of {len(plan['stock'])}")
                 if got < len(plan["stock"]):
-                    tg.send("⚠️ Some stock pictures could not be found:\n" + "\n".join("- " + n for n in notes if n.startswith("stock"))[:600])
+                    tg.send("⚠️ Some pictures could not be made (reason after each):\n" + "\n".join("- " + n for n in notes if n.startswith(("stock", "AI picture")))[:1500])
             for nm in plan.get("cutout", [])[:4]:
                 key = next((k for k in registry if k == nm or k.startswith(os.path.splitext(nm)[0])), None)
                 if key and registry[key]["kind"] == "image":
@@ -404,7 +404,7 @@ def main(job):
             vol = max(0.0, min(1.5, float(a.get("volume", 0.5 if role == "sfx" else 0.16))))
             st = max(0.0, float(a.get("start", 0)))
             if role == "sfx" and a.get("sfx") in sfx_files:
-                items.append({"path": sfx_files[a["sfx"]], "start": st, "volume": vol, "role": "sfx"})
+                items.append({"path": sfx_files[a["sfx"]], "start": st, "volume": vol, "role": "sfx", **({"dur": float(a["dur"])} if a.get("dur") else {})})
             elif role == "music" and a.get("asset") in paths and registry.get(a["asset"], {}).get("kind") == "audio":
                 items.append({"path": paths[a["asset"]], "start": st, "volume": vol, "role": "music", "loop": True})
             elif role == "voice" and a.get("asset") in registry and registry[a["asset"]].get("audio"):
