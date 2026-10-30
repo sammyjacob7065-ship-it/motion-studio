@@ -278,6 +278,87 @@ def sync(tl, audio, words, voice_start, assets):
     return tl, audio, lines
 
 
+def _move_y(layer, dy):
+    layer["y"] = round(float(layer.get("y", 0)) + dy, 1)
+    for k in (layer.get("anim") or {}).get("y", []) or []:
+        try:
+            k[1] = round(float(k[1]) + dy, 1)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def declutter(tl, assets):
+    """Nothing may sit on top of anything else: text vs captions, text vs text, text vs icons. A text that is in the way slides up or down
+    (with the plate / line / icon that belongs to it) to the nearest free place. Returns the list of what was moved."""
+    W, H = tl["width"], tl["height"]
+    layers = tl["layers"]
+    zones = []
+    for l in layers:
+        if l["type"] == "captions" and (l.get("props") or {}).get("words"):
+            size = float((l["props"].get("size")) or 74)
+            cy = float(l["props"].get("y") or H * 0.72)
+            half = size * 1.25 + 14
+            zones.append((l, (W * 0.07, cy - half, W * 0.93, cy + half)))
+
+    def box(l):
+        return T._box(l, W, H, assets)
+
+    def clash(l, b, others):
+        for o, ob in others:
+            if o is l:
+                continue
+            if min(l["end"], o["end"]) - max(l["start"], o["start"]) < 0.25:
+                continue
+            small = min((b[2] - b[0]) * (b[3] - b[1]), (ob[2] - ob[0]) * (ob[3] - ob[1])) or 1
+            if T._inter(b, ob) / small > 0.06:
+                return True
+        return False
+
+    def solids():
+        out = list(zones)
+        for o in layers:
+            if o["type"] in ("text", "counter", "icon"):
+                ob = box(o)
+                if ob:
+                    out.append((o, ob))
+        return out
+
+    moved = []
+    for l in sorted([x for x in layers if x["type"] in ("text", "counter")], key=lambda x: x["start"]):
+        b = box(l)
+        if not b:
+            continue
+        others = solids()
+        if not clash(l, b, others):
+            continue
+        near_zone = any(z is not l and min(l["end"], z["end"]) - max(l["start"], z["start"]) >= 0.25 and T._inter(b, zb) > 0 for z, zb in zones)
+        order = [-1, 1] if near_zone else [1, -1]
+        done = False
+        for step in range(30, 900, 30):
+            for sgn in order:
+                dy = sgn * step
+                nb = (b[0], b[1] + dy, b[2], b[3] + dy)
+                if nb[1] < H * 0.05 or nb[3] > H * 0.95:
+                    continue
+                if clash(l, nb, others):
+                    continue
+                # the plate / line / icon that belongs to this text moves with it
+                for m in layers:
+                    if m is l or m["type"] not in ("shape", "line", "icon") or _fullbleed(m, W):
+                        continue
+                    if min(l["end"], m["end"]) - max(l["start"], m["start"]) < 0.2:
+                        continue
+                    if b[0] - 80 <= m.get("x", -1e9) <= b[2] + 80 and b[1] - 80 <= m.get("y", -1e9) <= b[3] + 80:
+                        _move_y(m, dy)
+                _move_y(l, dy)
+                moved.append(f"'{str((l.get('props') or {}).get('text') or l['id'])[:22]}' moved {'up' if dy < 0 else 'down'} {abs(dy)}px (was on top of other text/captions)")
+                done = True
+                break
+            if done:
+                break
+    return moved
+
+
 def polish(tl):
     """Small safe touches that make the video livelier. Only adds; never removes."""
     dur, W, H = tl["duration"], tl["width"], tl["height"]
@@ -313,6 +394,12 @@ def finalize(tl, audio, words, voice_start, assets):
         tl, added = polish(tl)
         if added:
             lines.append("added: " + ", ".join(added))
+        try:
+            fixed = declutter(tl, assets)
+            if fixed:
+                lines.append("no overlaps: " + "; ".join(fixed[:4]))
+        except Exception as e:  # noqa: BLE001
+            print("declutter skipped:", e)
         return tl, audio, lines
     except Exception as e:  # noqa: BLE001
         print("sync check skipped:", e)
