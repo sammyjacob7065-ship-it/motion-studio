@@ -8,6 +8,7 @@ Three kinds of calls, each separate so they can be tuned or swapped for a strong
   coverage()  ticks every requirement against the finished timeline
 """
 import json
+import re
 import os
 import groq
 from common import env
@@ -117,6 +118,10 @@ def _repair_plan(plan, prompt):
         q = re.search(r"(?:voice[- ]?over|narration|voice)[^\n\"\u201c]{0,120}[:\n]\s*[\"\u201c]([^\"\u201d]{20,2500})[\"\u201d]", text, re.I)
         if q:
             plan["voiceover"] = {"mode": "generate", "text": " ".join(q.group(1).split())}
+    # pictures written in the brief line by line:  1. "voice words": Picture of a tarred road ...
+    pics = pictures_from_brief(text)
+    if pics and len(pics) > len(plan.get("stock") or []):
+        plan["stock"] = pics
     # stock pictures the brief asks us to find
     if not plan.get("stock"):
         f = re.search(r"find\b[^.\n]{0,60}?\b(photos?|pictures?|images?|videos?|clips?)\b[^.\n]{0,40}?\bof\b\s+([^.\n]{10,400})", text, re.I)
@@ -197,6 +202,106 @@ def _layer_line(l):
     what = p.get("text") or p.get("asset") or p.get("shape") or p.get("name") or p.get("mode") or ""
     return "- %s %s %.1f-%.1fs x=%s y=%s z=%s %s" % (l.get("id", "?"), l.get("type", "?"), float(l.get("start", 0) or 0), float(l.get("end", 0) or 0),
                                                   l.get("x", ""), l.get("y", ""), l.get("z", ""), str(what).replace("\n", " / ")[:40])
+
+
+_HEAD = re.compile(r"^\s*(?:#+\s*)?(?:scene|shot|picture|image)\s*\d{1,2}\b|^\s*\d{1,2}[.)]\s", re.I)
+_IMG = re.compile(r"^\s*(?:[-*\u2022]\s*)?(?:image[ _-]?prompt|picture[ _-]?prompt|image|picture|photo|visual|background[ _-]?image)\s*[:\-]\s*(.+)$", re.I)
+_VO = re.compile(r"^\s*(?:[-*\u2022]\s*)?(?:voice[- ]?over|voice|narration|narrator|vo|say|speech|line)\s*[:\-]\s*[\"\u201c]?(.+?)[\"\u201d]?\s*$", re.I)
+_OTHER = re.compile(r"^\s*(?:[-*\u2022]\s*)?(?:seconds?|time|camera|motion|action|animation|label|text|title|sound|sfx|music|caption|captions|transition|note|notes|effect|effects|graphic|graphics)\s*[:\-]", re.I)
+
+
+def pictures_from_brief(text):
+    """The script controls the pictures. Reads the image prompt the client wrote for each scene (IMAGE: / IMAGE PROMPT: / PICTURE: ...) and the voice line
+    of the same scene (VOICE: / NARRATION: ...). The prompt is used exactly as written. Also understands '1. "spoken words": Picture of ...' lines."""
+    lines = str(text or "").splitlines()
+    blocks, cur = [], None
+    for ln in lines:
+        if _HEAD.match(ln) and not _IMG.match(ln):
+            cur = {"img": "", "vo": "", "head": ln}
+            blocks.append(cur)
+            rest = re.sub(r"^\s*(?:#+\s*)?(?:scene|shot|picture|image)?\s*\d{1,2}[.):\-]?\s*", "", ln, flags=re.I)
+            q = re.match(r"[\"\u201c]([^\"\u201d]{3,200})[\"\u201d]\s*[:\-]?\s*(.*)$", rest)
+            if q:
+                cur["vo"] = q.group(1)
+                d = re.search(r"\b(?:picture|image|photo|photograph)\s+of\s+(.+?)(?:\.\s|\.$|$)", q.group(2), re.I)
+                if d:
+                    cur["img"] = "Photo of " + " ".join(d.group(1).split()).strip(" .")
+            cur["_cap"] = None
+            continue
+        if cur is None:
+            continue
+        m = _IMG.match(ln)
+        if m:
+            cur["img"], cur["_cap"] = m.group(1).strip(), "img"
+            continue
+        m = _VO.match(ln)
+        if m:
+            cur["vo"], cur["_cap"] = m.group(1).strip(), "vo"
+            continue
+        if _OTHER.match(ln) or not ln.strip():
+            cur["_cap"] = None
+            continue
+        if cur.get("_cap") == "img":
+            cur["img"] += " " + ln.strip()
+        elif cur.get("_cap") == "vo":
+            cur["vo"] += " " + ln.strip().strip("\"\u201c\u201d")
+    out = []
+    for b in blocks:
+        img = " ".join(b["img"].split())
+        if len(img) < 8:
+            continue
+        out.append({"id": f"pic{len(out) + 1}", "query": " ".join(re.sub(r"[^A-Za-z0-9 ]", " ", img).split()[:5]), "prompt": img[:900], "exact": True,
+                    "phrase": " ".join(b["vo"].split())[:200], "kind": "image", "why": "written in the brief"})
+    return out[:12]
+
+
+def image_department(brief_text, plan, supplied_images):
+    """The picture department. When the client sent no (or few) pictures, it decides which pictures the video needs, one for each spoken idea,
+    and writes the image prompt for each. Returns stock-style requests [{id, query, prompt, phrase, kind}] that the image makers fill."""
+    import math
+    text = str(brief_text or "")
+    if re.search(r"\b(no|without)\s+(pictures?|images?|photos?|stock)\b|text[- ]only|only text|only the (supplied|my) (pictures|images)", text, re.I):
+        return []
+    vo = plan.get("voiceover") or {}
+    spoken = " ".join(str(vo.get("text") or "").split())
+    try:
+        dur = float(plan.get("duration") or 0) or 30.0
+    except Exception:  # noqa: BLE001
+        dur = 30.0
+    if any(x.get("why") == "written in the brief" for x in (plan.get("stock") or [])):
+        return []                                              # the script wrote its own picture prompts: it controls the pictures
+    have = len(plan.get("stock") or []) + supplied_images
+    want = max(3, min(9, int(round(dur / 4.0))))
+    if not spoken or have >= 3:
+        return []
+    need = want - have
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", spoken) if len(s.strip()) > 3]
+    african = bool(re.search(r"nigeria|lagos|abuja|naira|ibadan|africa|ghana|kenya|en-NG", text + " " + str(vo), re.I))
+    context = " ".join(text.split())[:260]
+    pics = []
+    try:
+        msg = ("Voice-over sentences:\n" + "\n".join(f"{i + 1}. {s}" for i, s in enumerate(sentences[:24])) + f"\n\nBrief (for the subject and mood): {context}\n\n"
+               f"Choose {need} voice-over sentences or ideas that deserve a picture on screen, spread across the whole video. For each give the exact words of that voice line and an image prompt: one sentence that describes the picture the viewer should SEE while that line is spoken "
+               "(subject, place, light, camera angle). It must show what the words say, never something else. No text, no logos, no people's faces in close-up unless the line is about people." + (" People and places are African/Nigerian." if african else "") +
+               '\nReply JSON only: {"pictures":[{"phrase":"exact words","prompt":"photorealistic ... "}]}')
+        ans = groq.chat([{"role": "system", "content": "You are the picture editor of a professional advert studio. You write precise image prompts."}, {"role": "user", "content": msg}], temperature=0.4, max_tokens=1500, reasoning="low")
+        for it in (groq.parse_json(ans).get("pictures") or [])[:need]:
+            if isinstance(it, dict) and str(it.get("prompt") or "").strip():
+                pics.append({"phrase": str(it.get("phrase") or "")[:200], "prompt": str(it["prompt"]).strip()[:600]})
+    except Exception as e:  # noqa: BLE001
+        print("picture department: using the simple way (", str(e)[:80], ")")
+    if len(pics) < need:                                       # simple way: one picture per spoken idea, taken from the words themselves
+        step = max(1, len(sentences) // max(1, need))
+        used = {p["phrase"] for p in pics}
+        for s in sentences[::step]:
+            if len(pics) >= need:
+                break
+            if s not in used:
+                pics.append({"phrase": s, "prompt": f"Photorealistic cinematic photo that shows: {s} {context[:120]}" + (" African setting." if african else "")})
+    out = []
+    for i, p in enumerate(pics[:need]):
+        out.append({"id": f"auto{i + 1}", "query": " ".join(re.sub(r"[^A-Za-z0-9 ]", " ", p["phrase"]).split()[:5]) or "scene", "prompt": p["prompt"], "phrase": p["phrase"], "kind": "image", "why": "picture department"})
+    return out
 
 
 PART_HOOK = {"load": None, "save": None}     # set by run.py: saves each finished part so /resume does not redo it
