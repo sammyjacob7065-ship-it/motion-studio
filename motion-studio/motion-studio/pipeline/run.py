@@ -86,6 +86,22 @@ def main(job):
     if not brief:
         raise SystemExit(f"No brief found for job {job}")
     tg = Telegram(brief["chat_id"])
+    # a .txt / .md file sent to the bot is the script: its text becomes the prompt (a short typed message such as "go" only starts the job)
+    try:
+        scripts = [x for x in brief.get("assets", []) if str(x.get("path", "")).lower().endswith((".txt", ".md"))]
+        if scripts:
+            parts = []
+            for x in scripts:
+                tmp = os.path.join("work", job, "script_" + os.path.basename(x["path"]))
+                store.download(x["path"], tmp)
+                parts.append(open(tmp, encoding="utf-8", errors="ignore").read().strip())
+            typed = str(brief.get("prompt", "")).strip()
+            if typed and not typed.lower().startswith("script file:") and len(typed) > 40:
+                parts.append(typed)
+            brief["prompt"] = "\n\n".join(p for p in parts if p)
+            brief["assets"] = [x for x in brief["assets"] if x not in scripts]
+    except Exception as e:  # noqa: BLE001
+        print("script file not read:", e)
     mon = Monitor(store, tg, job)
     work = os.path.abspath(os.path.join("work", job))
     os.makedirs(work, exist_ok=True)
