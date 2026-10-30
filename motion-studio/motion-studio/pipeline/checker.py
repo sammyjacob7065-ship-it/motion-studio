@@ -220,6 +220,26 @@ def sync(tl, audio, words, voice_start, assets):
     pics = sorted([l for l in layers if _fullbleed(l, W) and not _is_ambient(l, dur)], key=lambda x: x["start"])
     for a, b in zip(pics, pics[1:]):
         a["end"] = round(min(dur, max(a["start"] + 0.5, b["start"] + 0.3)), 3)
+    # 3b) every graphic leaves with the picture of its scene (the words of "24/7 SECURITY" must not stay after the gate picture is gone)
+    left = 0
+    if len(pics) >= 2:
+        for l in layers:
+            if l["type"] not in ("text", "counter", "icon", "shape", "line") or _is_ambient(l, dur) or _fullbleed(l, W):
+                continue
+            owner = None
+            for k, pic in enumerate(pics):
+                if pic["start"] - 0.05 <= l["start"] < (pics[k + 1]["start"] if k + 1 < len(pics) else 1e9):
+                    owner = k
+            if owner is None or owner >= len(pics) - 1:
+                continue                                   # before the first picture, or in the last scene (the logo / call to action stays)
+            wend = round(pics[owner + 1]["start"] + 0.15, 3)
+            if l["end"] > wend + 0.05:
+                l["end"] = max(wend, round(l["start"] + 0.8, 3))
+                if not l.get("exit"):
+                    l["exit"] = {"preset": "fade", "dur": 0.3}
+                left += 1
+    if left:
+        report.append((0.0, f"{left} graphics now leave with their picture"))
     # 4) sound effects follow their graphic (or the time map)
     moved_audio = 0
     for a in audio or []:
