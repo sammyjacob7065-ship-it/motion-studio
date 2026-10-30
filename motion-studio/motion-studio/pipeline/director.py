@@ -422,6 +422,44 @@ def repair(prev_tl, prev_audio, problems, original_user):
     return _split(groq.parse_json(ans))
 
 
+def edit(prev_tl, prev_audio, notes, registry, plan_json, brief_text, size, sfx_names):
+    """The edit department: changes ONLY what the client's edit notes ask for in the finished timeline, keeps everything else exactly.
+    Uses Gemini (big answers) when its key is set, otherwise the Groq director. Returns (timeline, audio, new_pictures, what_changed)."""
+    import gemini
+    W, H = size
+    user = (
+        f"ORIGINAL CLIENT BRIEF (for context):\n<<<\n{str(brief_text)[:6000]}\n>>>\n\n"
+        f"CANVAS: {W}x{H} ({plan_json.get('aspect', '9:16')}), 30 fps\n\n"
+        f"ASSETS (use these exact file names):\n{asset_table(registry)}\n\n"
+        f"SOUND EFFECTS AVAILABLE: {', '.join(sfx_names)}\n\n"
+        f"THE FINISHED VIDEO AS A TIMELINE (JSON):\n{json.dumps({'timeline': prev_tl, 'audio': prev_audio}, separators=(',', ':'))}\n\n"
+        "EDIT REQUESTS FROM THE CLIENT (do exactly these, in order):\n" + "\n".join(f"{i + 1}. {n}" for i, n in enumerate(notes)) + "\n\n"
+        "RULES FOR THIS EDIT:\n"
+        "- Change ONLY what the requests ask. Every other layer keeps its id, start, end, position, size, effects and timing exactly as in the timeline above.\n"
+        "- Keep the voice-over timing, captions and the video length unless a request says otherwise.\n"
+        "- If a request needs a NEW picture (for example: show a modern kitchen), list it in new_pictures with a file name newpic1.jpg, newpic2.jpg ... and a full image prompt "
+        "(one sentence: subject, place, light, camera angle, photorealistic, no text), and use that file name in the image layer that replaces the old picture (same start, end and size).\n"
+        "- A request about a time (for example: the price comes late) means move that layer's start/end and its sound; keep its length.\n"
+        '- Reply with JSON only: {"timeline": {the FULL timeline with the changes}, "audio": [the FULL audio list with the changes], "new_pictures": [{"asset":"newpic1.jpg","prompt":"..."}], "changed": "one short plain sentence per request saying what you did"}'
+    )
+    ans, why = None, ""
+    if gemini.available():
+        try:
+            ans = gemini.parse_json(gemini.generate(user, system=system_prompt(example=False), temperature=0.2))
+        except Exception as e:  # noqa: BLE001
+            why = str(e)[:150]
+            print("::warning::Gemini could not do the edit, trying Groq:", why)
+    if ans is None:                                            # backup: the Groq director
+        if est_tokens(system_prompt(False), user) > int(env("SMALL_REQUEST", str(SMALL_REQUEST))) + 1500:
+            raise RuntimeError("The edit is too big for the free Groq plan" + (f" and Gemini failed ({why})" if why else " (no Gemini key set)") + ". Try /resume in a few minutes.")
+        ans = groq.parse_json(groq.chat([{"role": "system", "content": system_prompt(False)}, {"role": "user", "content": user}], temperature=0.2, max_tokens=14000, reasoning="high"))
+    tl = ans.get("timeline")
+    if not isinstance(tl, dict) or not tl.get("layers"):
+        raise RuntimeError("The edit answer had no timeline.")
+    pics = [x for x in (ans.get("new_pictures") or []) if isinstance(x, dict) and x.get("asset") and x.get("prompt")][:6]
+    return tl, ans.get("audio") if isinstance(ans.get("audio"), list) else prev_audio, pics, str(ans.get("changed") or "")[:600]
+
+
 def critique(images_b64, requirements, times):
     """Vision check of preview frames. Returns list of {severity, time, what, fix}."""
     model = env("VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
