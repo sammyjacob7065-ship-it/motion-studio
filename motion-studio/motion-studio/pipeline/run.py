@@ -105,6 +105,19 @@ def main(job):
             brief["assets"] = [x for x in brief["assets"] if x not in scripts]
     except Exception as e:  # noqa: BLE001
         print("script file not read:", e)
+    wm_text = str(brief.get("watermark") or env("WATERMARK") or "")
+    _m = re.search(r"^[ \t]*WATERMARK[ \t]*:[ \t]*(.+?)[ \t]*$", str(brief.get("prompt", "")), re.I | re.M)
+    if _m:                                                         # a line "WATERMARK: name" in the script: used as the brand mark, and not shown as a text
+        wm_text = _m.group(1)
+        brief["prompt"] = re.sub(r"^[ \t]*WATERMARK[ \t]*:.*$\n?", "", str(brief["prompt"]), flags=re.I | re.M)
+    for _i, _n in enumerate(list(edit_notes)):                      # an edit note with the line "WATERMARK: name" sets the brand mark (done by the studio itself, not by the director)
+        _w = re.search(r"^[ \t]*WATERMARK[ \t]*:[ \t]*(.+?)[ \t]*$", str(_n), re.I | re.M)
+        if _w:
+            wm_text = _w.group(1)
+            edit_notes[_i] = re.sub(r"^[ \t]*WATERMARK[ \t]*:.*$\n?", "", str(_n), flags=re.I | re.M).strip()
+    if brief.get("edit_of") and not any(edit_notes):
+        edit_notes = ["Change nothing in the video."]          # a watermark-only edit still counts as an edit (nothing else is touched)
+    edit_notes = [n for n in edit_notes if n]
     mon = Monitor(store, tg, job)
     work = os.path.abspath(os.path.join("work", job))
     os.makedirs(work, exist_ok=True)
@@ -403,6 +416,18 @@ def main(job):
             _ck_save(store, job, "timeline", {"raw_tl": raw_tl, "raw_audio": raw_audio, "dnotes": dnotes, "user_msg": user_msg})
 
         def sync_check(t, a):
+            t, a, lines = _sync_core(t, a)
+            try:
+                cut = checker.handoff(t, registry)                      # a label leaves the moment the next one arrives
+                if cut:
+                    lines = list(lines) + ["labels hand over: " + "; ".join(cut[:3])]
+                if wm_text and checker.watermark(t, wm_text):
+                    lines = list(lines) + [f"watermark: {wm_text[:30]}"]
+            except Exception as e:  # noqa: BLE001
+                print("hand-over / watermark skipped:", e)
+            return t, a, lines
+
+        def _sync_core(t, a):
             if edit_notes:                                 # an edit changes only what was asked: no re-timing, no extras; only overlaps are cleaned
                 try:
                     moved = checker.declutter(t, registry)
