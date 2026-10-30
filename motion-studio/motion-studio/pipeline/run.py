@@ -87,6 +87,8 @@ def main(job):
     if not brief:
         raise SystemExit(f"No brief found for job {job}")
     tg = Telegram(brief["chat_id"])
+    src = brief.get("ckpt_from") or job          # an edit job reads the saved plan / pictures / voice of the video it edits
+    edit_notes = brief.get("edit_notes") or []
     # a .txt / .md file sent to the bot is the script: its text becomes the prompt (a short typed message such as "go" only starts the job)
     try:
         scripts = [x for x in brief.get("assets", []) if str(x.get("path", "")).lower().endswith((".txt", ".md"))]
@@ -146,7 +148,7 @@ def main(job):
         # ---- 2. plan
         stage = "Director planning"
         mon.stage("plan")
-        ck_plan = _ck(store, job, "plan")
+        ck_plan = _ck(store, src, "plan")
         resumed = []
         if ck_plan and ck_plan.get("plan"):
             plan = ck_plan["plan"]
@@ -164,7 +166,7 @@ def main(job):
 
         # ---- 3. stock pictures
         pic_report = []
-        if _ck(store, job, "pictures") is None:
+        if _ck(store, src, "pictures") is None:
             try:
                 auto = director.image_department(brief["prompt"], plan, len([1 for a in registry.values() if a.get("kind") == "image" and not a.get("alpha")]),
                                                  have_video=any(a.get("kind") == "video" for a in registry.values()),
@@ -175,12 +177,12 @@ def main(job):
                     mon.note("stock", f"picture department: {len(auto)} pictures to make")
             except Exception as e:  # noqa: BLE001
                 print("picture department skipped:", e)
-        ck_stock = _ck(store, job, "pictures")
+        ck_stock = _ck(store, src, "pictures")
         if ck_stock is not None:
             for nm, info in (ck_stock.get("entries") or {}).items():
                 try:
                     dst = os.path.join(adir, nm)
-                    store.download(f"motion/jobs/{job}/ckpt/files/{nm}", dst)
+                    store.download(f"motion/jobs/{src}/ckpt/files/{nm}", dst)
                     registry[nm], paths[nm] = info, dst
                 except Exception as e:  # noqa: BLE001
                     notes.append(f"saved picture {nm} could not be reloaded ({str(e)[:50]})")
@@ -245,12 +247,12 @@ def main(job):
         vo = plan.get("voiceover", {}) or {}
         voice_path, words, voice_len, music_names = None, [], 0.0, []
         video_words = {}
-        ck_voice = _ck(store, job, "voice")
+        ck_voice = _ck(store, src, "voice")
         if ck_voice is not None:
             words, voice_len, music_names, video_words = ck_voice.get("words", []), float(ck_voice.get("voice_len", 0)), ck_voice.get("music_names", []), ck_voice.get("video_words", {})
             try:
                 if ck_voice.get("how") == "generated":
-                    voice_path = store.download(f"motion/jobs/{job}/ckpt/files/voice.mp3", os.path.join(work, "voice.mp3"))
+                    voice_path = store.download(f"motion/jobs/{src}/ckpt/files/voice.mp3", os.path.join(work, "voice.mp3"))
                 elif ck_voice.get("how") == "supplied":
                     sv, _sm = pick_voice_and_music(registry, paths)
                     voice_path = paths.get(sv)
@@ -334,6 +336,12 @@ def main(job):
                         if not re.search(r"\b\d{1,3}\s*[- ]?\s*(?:seconds?|secs?)\b", str(brief.get("prompt", "")), re.I):
                             plan["duration"] = round(min(60.0, float(registry[music[0]].get("duration") or 30)), 1)
                         mon.note("voice", f"music: {beat_info['bpm']:.0f} BPM")
+        ref = brief.get("reference")
+        if ref and isinstance(ref, dict) and ref.get("scenes"):      # STYLE REFERENCE from a video the client likes: copy structure, pace and feel
+            lines = "\n".join(f"  {i + 1}. {sc.get('start', 0):.1f}-{sc.get('end', 0):.1f}s: {sc.get('what', '')} | text: {sc.get('text_on_screen', '')} | motion: {sc.get('motion', '')} | change: {sc.get('transition', '')}" for i, sc in enumerate(ref["scenes"][:30]))
+            extra += (f"STYLE REFERENCE (a video the client likes; its length {ref.get('duration', 0):.0f}s, pace {ref.get('pace', '')}, look: {ref.get('style', '')}, music: {ref.get('music', '')}). Build the NEW video with the SAME structure: about {len(ref['scenes'])} scenes, "
+                      f"the same rhythm (scene lengths close to these), the same kind of text animation, camera moves and transitions. Use ONLY the client's own words, brand, pictures and logo; never copy anything written in the reference.\n{lines}\n")
+            mon.note("plan", f"style reference used: {len(ref['scenes'])} scenes")
         def speech_off(t):
             """Where the speech starts on the timeline: the voice-over start, or the place of the talking video."""
             if talk:
@@ -343,8 +351,39 @@ def main(job):
 
         director.PART_HOOK["load"] = lambda k: _ck(store, job, f"part{k}")
         director.PART_HOOK["save"] = lambda k, obj: _ck_save(store, job, f"part{k}", obj)
-        ck_tl = _ck(store, job, "timeline")
-        if ck_tl and ck_tl.get("raw_tl"):
+        ck_tl = None if edit_notes else _ck(store, job, "timeline")
+        if edit_notes:
+            # ---- the edit department: the finished timeline of the video being edited, changed only where the client asked
+            stage = "Applying your edit"
+            prev = store.get_json(f"motion/jobs/{brief.get('edit_of')}/timeline.json") or {}
+            if not prev.get("timeline"):
+                raise RuntimeError("The video you want to edit was not found (its timeline is not saved). Send your prompt again to make it fresh.")
+            new_tl, raw_audio, newpics, dnotes = director.edit(prev["timeline"], prev.get("audio") or [], edit_notes, registry, plan, brief["prompt"], size, mix.SFX_NAMES)
+            made = {}
+            for npc in newpics:
+                stem = os.path.splitext(str(npc["asset"]))[0]
+                pth, prov = imagegen.generate(str(npc["prompt"]), plan.get("aspect"), adir, re.sub(r"[^A-Za-z0-9_-]", "", stem) or "newpic", exact=True)
+                if not pth:
+                    notes.append(f"new picture {stem}: {prov[:150]}")
+                    continue
+                final, info, flags = A.analyze(pth, work)
+                nm = os.path.basename(final)
+                info["flags"], info["origin"], info["query"], info["phrase"] = flags, f"AI picture ({prov}) for the edit", str(npc["prompt"])[:60], ""
+                registry[nm], paths[nm] = info, final
+                made[str(npc["asset"])] = nm
+                if _ck_file(store, src, nm, final):                       # kept with the video's saved pictures so later edits can use it too
+                    old = _ck(store, src, "pictures") or {"entries": {}}
+                    old.setdefault("entries", {})[nm] = json.loads(json.dumps(info, default=str))
+                    _ck_save(store, src, "pictures", old)
+            for l in new_tl.get("layers", []):
+                a_ = (l.get("props") or {}).get("asset")
+                if a_ in made:
+                    l["props"]["asset"] = made[a_]
+            new_tl.setdefault("aspect", plan.get("aspect", "9:16"))
+            raw_tl, user_msg = new_tl, ""
+            tl, warns = T.normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
+            tg.send("✏️ Edit understood: " + str(dnotes)[:500] + "\nRendering the new version now.")
+        elif ck_tl and ck_tl.get("raw_tl"):
             raw_tl, raw_audio, dnotes, user_msg = ck_tl["raw_tl"], ck_tl.get("raw_audio"), ck_tl.get("dnotes"), ck_tl.get("user_msg", "")
             tl, warns = T.normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
             resumed.append("timeline")
@@ -364,6 +403,12 @@ def main(job):
             _ck_save(store, job, "timeline", {"raw_tl": raw_tl, "raw_audio": raw_audio, "dnotes": dnotes, "user_msg": user_msg})
 
         def sync_check(t, a):
+            if edit_notes:                                 # an edit changes only what was asked: no re-timing, no extras; only overlaps are cleaned
+                try:
+                    moved = checker.declutter(t, registry)
+                except Exception:  # noqa: BLE001
+                    moved = []
+                return t, a, (["no overlaps: " + "; ".join(moved[:3])] if moved else [])
             if voice_path:
                 return checker.finalize(t, a, words, VOICE_START, registry)
             if talk:
@@ -372,7 +417,7 @@ def main(job):
 
         tl, raw_audio, sync_lines = sync_check(tl, raw_audio)
         mon.done_stage("timeline", f"{len(tl['layers'])} layers, {tl['duration']:.1f}s")
-        if resumed:
+        if resumed and not edit_notes:
             tg.send("♻️ Resuming this job: I reused the saved " + ", ".join(resumed) + " and continued from there.")
 
         def fill_captions(t):
@@ -392,7 +437,7 @@ def main(job):
         fill_captions(tl)
 
         # ---- 6. review (preview frames, vision check)
-        if env("REVIEW", "1") == "1":
+        if env("REVIEW", "0") == "1":      # the preview-frame check is OFF by default: it started the renderer 5 extra times (minutes) and no vision model is free now
             stage = "Checking the layout"
             mon.stage("review")
             try:
@@ -471,7 +516,7 @@ def main(job):
         facts = ""
         if voice_path:
             facts = f"A voice-over of {voice_len:.0f} seconds was generated with a male Nigerian voice and mixed into the video. It reads: " + str((plan.get("voiceover") or {}).get("text", ""))[:600] + ". Captions: " + ("a captions layer follows the voice." if any(l["type"] == "captions" for l in tl["layers"]) else "none.") + " Sound effects were mixed in at the audio events."
-        cov = director.coverage(plan.get("requirements", []), tl, raw_audio, dnotes, facts)
+        cov = [] if edit_notes else director.coverage(plan.get("requirements", []), tl, raw_audio, dnotes, facts)
         done = [c for c in cov if c["status"] == "done"]
         lines = [f"✅ Your video is ready ({tl['width']}x{tl['height']}, {tl['duration']:.0f}s)."]
         if cov:
@@ -485,7 +530,8 @@ def main(job):
         if sync_lines:
             lines.append("Checked and synced: " + "; ".join(sync_lines)[:350])
         if dnotes:
-            lines.append("Note: " + str(dnotes)[:300])
+            lines.append(("Edit applied: " if edit_notes else "Note: ") + str(dnotes)[:300])
+        lines.append("✏️ Not perfect? Send /edit, tell me what feels off, then /apply.")
         size_mb = os.path.getsize(final) / 1e6
         if size_mb <= 48:
             try:
