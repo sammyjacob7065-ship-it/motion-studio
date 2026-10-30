@@ -25,6 +25,13 @@ def prepare(timeline, asset_paths, work):
         used.add(bg)
     for name in used:
         shutil.copy(asset_paths[name], os.path.join(dest, name))
+        if name.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):         # a picture the renderer cannot open would stall the whole render: say which one
+            try:
+                from PIL import Image
+                with Image.open(os.path.join(dest, name)) as im:
+                    im.load()
+            except Exception as e:  # noqa: BLE001
+                raise RuntimeError(f"picture '{name}' is broken and cannot be opened ({str(e)[:60]})")
     with open(os.path.join(work, "timeline.json"), "w", encoding="utf-8") as f:      # the plain timeline (kept for debugging)
         json.dump(timeline, f)
     pp = os.path.join(work, "props.json")
@@ -36,18 +43,22 @@ def prepare(timeline, asset_paths, work):
 def _run(cmd, on_line=None, timeout=3 * 3600):
     p = subprocess.Popen(cmd, cwd=ENGINE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     tail = []
+    errs = []
     for line in p.stdout:
         tail.append(line)
         tail = tail[-40:]
+        if re.search(r"error|failed|timed out|delayRender", line, re.I) and len(errs) < 6:
+            errs.append(line)
         if on_line:
             on_line(line)
     p.wait(timeout=timeout)
+    _run.errors = "".join(errs)
     return p.returncode, "".join(tail)
 
 
 def render_video(timeline, props_path, out_path, on_progress=None):
     conc = env("RENDER_CONCURRENCY", "4")
-    cmd = ["npx", "remotion", "render", "src/index.ts", "Main", os.path.abspath(out_path), f"--props={props_path}", "--codec=h264", "--crf=18", "--muted", f"--concurrency={conc}", "--log=info"]
+    cmd = ["npx", "remotion", "render", "src/index.ts", "Main", os.path.abspath(out_path), f"--props={props_path}", "--codec=h264", "--crf=18", "--muted", f"--concurrency={conc}", "--timeout=120000", "--log=info"]
 
     def on_line(line):
         m = re.search(r"Rendered (\d+)/(\d+)", line)
@@ -55,7 +66,8 @@ def render_video(timeline, props_path, out_path, on_progress=None):
             on_progress(int(100 * int(m.group(1)) / max(1, int(m.group(2)))))
     code, tail = _run(cmd, on_line)
     if code != 0 or not os.path.exists(out_path):
-        raise RuntimeError("render failed: " + re.sub(r"\s+", " ", tail)[-500:])
+        first = re.sub(r"\x1b\[[0-9;]*m", "", getattr(_run, "errors", ""))
+        raise RuntimeError("render failed. FIRST ERRORS: " + re.sub(r"\s+", " ", first)[:450] + " ... LAST LINES: " + re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;]*m", "", tail))[-250:])
     return out_path
 
 
