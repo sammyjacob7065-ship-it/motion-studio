@@ -444,11 +444,17 @@ def edit(prev_tl, prev_audio, notes, registry, plan_json, brief_text, size, sfx_
     )
     ans, why = None, ""
     if gemini.available():
-        try:
-            ans = gemini.parse_json(gemini.generate(user, system=system_prompt(example=False), temperature=0.2))
-        except Exception as e:  # noqa: BLE001
-            why = str(e)[:150]
-            print("::warning::Gemini could not do the edit, trying Groq:", why)
+        ask = user
+        for attempt in range(3):                               # an answer with a broken comma is asked for again, not given up on
+            try:
+                ans = gemini.parse_json(gemini.generate(ask, system=system_prompt(example=False), temperature=0.2 if attempt == 0 else 0.0))
+                break
+            except Exception as e:  # noqa: BLE001
+                why = str(e)[:150]
+                print(f"::warning::Gemini edit attempt {attempt + 1} failed:", why)
+                if "JSON" not in why and "Expecting" not in why and "delimiter" not in why and "no JSON" not in why:
+                    break
+                ask = user + f"\n\nIMPORTANT: your previous answer was NOT valid JSON ({why}). Answer again with the complete answer as STRICTLY valid JSON: double quotes, commas between all items, no comments, no trailing commas, nothing outside the JSON."
     if ans is None:                                            # backup: the Groq director
         if est_tokens(system_prompt(False), user) > int(env("SMALL_REQUEST", str(SMALL_REQUEST))) + 1500:
             raise RuntimeError("The edit is too big for the free Groq plan" + (f" and Gemini failed ({why})" if why else " (no Gemini key set)") + ". Try /resume in a few minutes.")
