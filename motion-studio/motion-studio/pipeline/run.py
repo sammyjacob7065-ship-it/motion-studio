@@ -12,6 +12,7 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import assets as A  # noqa: E402
+import beats  # noqa: E402
 import checker  # noqa: E402
 import director  # noqa: E402
 import groq  # noqa: E402
@@ -165,7 +166,10 @@ def main(job):
         pic_report = []
         if _ck(store, job, "pictures") is None:
             try:
-                auto = director.image_department(brief["prompt"], plan, len([1 for a in registry.values() if a.get("kind") == "image" and not a.get("alpha")]))
+                auto = director.image_department(brief["prompt"], plan, len([1 for a in registry.values() if a.get("kind") == "image" and not a.get("alpha")]),
+                                                 have_video=any(a.get("kind") == "video" for a in registry.values()),
+                                                 has_music=any(a.get("kind") == "audio" for a in registry.values()),
+                                                 dur_hint=max([float(a.get("duration") or 0) for a in registry.values() if a.get("kind") == "audio"] or [0]) or None)
                 if auto:
                     plan["stock"] = list(plan.get("stock") or []) + auto
                     mon.note("stock", f"picture department: {len(auto)} pictures to make")
@@ -284,7 +288,7 @@ def main(job):
                     words = fallback_words(vo.get("text", ""), voice_len)
                     notes.append("word timing guessed (speech check failed: " + str(e)[:60] + ")")
             video_words = {}
-            if plan.get("transcribe_videos") or plan.get("captions"):
+            if plan.get("transcribe_videos") or plan.get("captions") or not voice_path:
                 for n, a in registry.items():
                     if a.get("kind") == "video" and a.get("audio"):
                         try:
@@ -307,7 +311,36 @@ def main(job):
         stage = "Writing the timeline"
         mon.stage("timeline")
         sfx_files = mix.make_sfx(os.path.join(work, "sfx"))
+        # what drives the timing: the voice-over, a talking video (its own speech), or the music (its beat)
+        talk, beat_info, extra = None, None, ""
+        T0 = VOICE_START
         min_dur = (VOICE_START + voice_len) if voice_path else None
+        if not voice_path:
+            T0 = 0.0
+            cand = [n for n in video_words if len(video_words[n]) >= 6 and len(video_words[n]) >= 0.2 * float(registry.get(n, {}).get("duration") or 1)]   # enough real speech (not just music)
+            if cand:
+                talk = max(cand, key=lambda n: len(video_words[n]))
+                words = video_words[talk]
+                min_dur = float(registry[talk].get("duration") or (words[-1]["e"] + 1))
+                extra = (f"TALKING VIDEO: the file '{talk}' is a person speaking; the word times above are its own speech. Put it on screen as the main footage, starting at 0s with srcStart 0, "
+                         f"for its whole length ({min_dur:.1f}s). Add graphics, labels and sounds around it exactly when those words are spoken. If captions are wanted use words_from \"video:{talk}\". Do not make a voice-over.\n")
+                mon.note("voice", f"talking video: {len(words)} words from {talk}")
+            else:
+                music = [n for n in music_names if registry.get(n, {}).get("kind") == "audio" and n in paths]
+                if music:
+                    beat_info = beats.analyze(paths[music[0]])
+                    if beat_info:
+                        extra = beats.describe(beat_info) + f" The song is {float(registry[music[0]].get('duration') or 0):.1f}s long: use it as the soundtrack (role music, asset '{music[0]}').\n"
+                        if not re.search(r"\b\d{1,3}\s*[- ]?\s*(?:seconds?|secs?)\b", str(brief.get("prompt", "")), re.I):
+                            plan["duration"] = round(min(60.0, float(registry[music[0]].get("duration") or 30)), 1)
+                        mon.note("voice", f"music: {beat_info['bpm']:.0f} BPM")
+        def speech_off(t):
+            """Where the speech starts on the timeline: the voice-over start, or the place of the talking video."""
+            if talk:
+                vl = next((x for x in t["layers"] if x["type"] == "video" and (x.get("props") or {}).get("asset") == talk), None)
+                return (vl["start"] - float(vl["props"].get("srcStart", 0) or 0)) if vl else 0.0
+            return VOICE_START
+
         director.PART_HOOK["load"] = lambda k: _ck(store, job, f"part{k}")
         director.PART_HOOK["save"] = lambda k, obj: _ck_save(store, job, f"part{k}", obj)
         ck_tl = _ck(store, job, "timeline")
@@ -316,7 +349,7 @@ def main(job):
             tl, warns = T.normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
             resumed.append("timeline")
         else:
-            (raw_tl, raw_audio, dnotes), user_msg = director.timeline(brief["prompt"], plan, registry, words, VOICE_START, size, mix.SFX_NAMES, min_duration=min_dur)
+            (raw_tl, raw_audio, dnotes), user_msg = director.timeline(brief["prompt"], plan, registry, words, T0, size, mix.SFX_NAMES, min_duration=min_dur, extra=extra)
             raw_tl.setdefault("aspect", plan.get("aspect", "9:16"))
             tl, warns = T.normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
             problems = warns + T.check_layout(tl, registry)
@@ -331,9 +364,11 @@ def main(job):
             _ck_save(store, job, "timeline", {"raw_tl": raw_tl, "raw_audio": raw_audio, "dnotes": dnotes, "user_msg": user_msg})
 
         def sync_check(t, a):
-            if not voice_path:
-                return t, a, []
-            return checker.finalize(t, a, words, VOICE_START, registry)
+            if voice_path:
+                return checker.finalize(t, a, words, VOICE_START, registry)
+            if talk:
+                return checker.finalize(t, a, words, speech_off(t), registry, trim=False)
+            return checker.finalize(t, a, [], 0.0, registry, beat_info=beat_info)
 
         tl, raw_audio, sync_lines = sync_check(tl, raw_audio)
         mon.done_stage("timeline", f"{len(tl['layers'])} layers, {tl['duration']:.1f}s")
@@ -352,7 +387,8 @@ def main(job):
                     off = (vl["start"] - float(vl["props"].get("srcStart", 0))) if vl else float(l["props"].get("offset", 0))
                     l["props"]["words"] = [{"w": w["w"], "s": round(w["s"] + off, 3), "e": round(w["e"] + off, 3)} for w in vw]
                 else:
-                    l["props"]["words"] = [{"w": w["w"], "s": round(w["s"] + VOICE_START, 3), "e": round(w["e"] + VOICE_START, 3)} for w in words]
+                    off = speech_off(t)
+                    l["props"]["words"] = [{"w": w["w"], "s": round(w["s"] + off, 3), "e": round(w["e"] + off, 3)} for w in words]
         fill_captions(tl)
 
         # ---- 6. review (preview frames, vision check)
@@ -406,7 +442,7 @@ def main(job):
             if role == "sfx" and a.get("sfx") in sfx_files:
                 items.append({"path": sfx_files[a["sfx"]], "start": st, "volume": vol, "role": "sfx", **({"dur": float(a["dur"])} if a.get("dur") else {})})
             elif role == "music" and a.get("asset") in paths and registry.get(a["asset"], {}).get("kind") == "audio":
-                items.append({"path": paths[a["asset"]], "start": st, "volume": vol, "role": "music", "loop": True})
+                items.append({"path": paths[a["asset"]], "start": st, "volume": vol if (voice_path or talk) else max(vol, 0.85), "role": "music", "loop": True})   # a song with nobody speaking is the main sound
             elif role == "voice" and a.get("asset") in registry and registry[a["asset"]].get("audio"):
                 ap = os.path.join(os.path.dirname(paths[a["asset"]]), registry[a["asset"]]["audio"])
                 items.append({"path": ap, "start": st, "volume": 1.0, "role": "voice", "srcStart": float(a.get("srcStart", 0)), "dur": float(a.get("dur", 0)) or None})
@@ -421,7 +457,7 @@ def main(job):
         if not any(i["role"] == "music" for i in items) and music_names:
             mn = music_names[0]
             if mn in paths and registry[mn].get("kind") == "audio" and mn != sup_voice:
-                items.append({"path": paths[mn], "start": 0, "volume": 0.16, "role": "music", "loop": True})
+                items.append({"path": paths[mn], "start": 0, "volume": 0.16 if (voice_path or talk) else 0.9, "role": "music", "loop": True})
         final = os.path.join(work, "final.mp4")
         mix.mix(silent, items, tl["duration"], final)
         mon.done_stage("audio", f"{len(items)} sounds")
@@ -447,7 +483,7 @@ def main(job):
             ok = [x for x in pic_report if "NO PICTURE" not in x and "failed" not in x]
             lines.append(f"Pictures: {len(ok)} of {len(pic_report)} made" + (" (" + ", ".join(sorted(set(ok))) + ")" if ok else "") + (". Problems: " + "; ".join(x for x in pic_report if x not in ok)[:200] if len(ok) < len(pic_report) else ""))
         if sync_lines:
-            lines.append("Synced to the voice: " + "; ".join(sync_lines)[:350])
+            lines.append("Checked and synced: " + "; ".join(sync_lines)[:350])
         if dnotes:
             lines.append("Note: " + str(dnotes)[:300])
         size_mb = os.path.getsize(final) / 1e6
