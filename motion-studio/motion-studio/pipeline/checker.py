@@ -399,6 +399,18 @@ def handoff(tl, assets=None):
         n = min(nxt, key=lambda x: x["start"])
         if l["end"] <= n["start"] + 0.02:
             continue
+        if l["end"] >= dur - 2.5:                    # the ending (title + tagline + closing line) stays together until the last frame
+            continue
+        # only a label in the SAME place is replaced; a title with a tagline under it, or a line in another place, belongs together and stays
+        try:
+            bl, bn = T._box(l, W, H, assets or {}), T._box(n, W, H, assets or {})
+        except Exception:  # noqa: BLE001
+            bl = bn = None
+        if bl and bn:
+            small = min((bl[2] - bl[0]) * (bl[3] - bl[1]), (bn[2] - bn[0]) * (bn[3] - bn[1])) or 1
+            same_slot = T._inter(bl, bn) / small > 0.15 or abs(float(l.get("y", 0)) - float(n.get("y", 0))) < 90
+            if not same_slot:
+                continue
         old = l["end"]
         l["end"] = round(max(l["start"] + 0.5, n["start"]), 3)
         for m in layers:
