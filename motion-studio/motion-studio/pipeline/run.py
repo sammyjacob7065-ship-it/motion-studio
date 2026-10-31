@@ -118,6 +118,7 @@ def main(job):
     if brief.get("edit_of") and not any(edit_notes):
         edit_notes = ["Change nothing in the video."]          # a watermark-only edit still counts as an edit (nothing else is touched)
     edit_notes = [n for n in edit_notes if n]
+    checker.LAND_SOUND["name"] = "hit" if re.search(r"\bhit\b", str(brief.get("prompt", "")), re.I) else "sparkle"     # a hit only when the script asks for one
     mon = Monitor(store, tg, job)
     work = os.path.abspath(os.path.join("work", job))
     os.makedirs(work, exist_ok=True)
@@ -206,9 +207,13 @@ def main(job):
                 stage = "Getting pictures"
                 mon.stage("stock")
                 got = 0
+                retry = []                                         # pictures that failed everywhere: tried again at the end with softer wording
+                skipped = 0
+                lost = []
                 spoken = str((plan.get("voiceover") or {}).get("text", "")) or str(brief.get("prompt", ""))
                 for req in plan["stock"][:10]:
                     if any(w in str(req.get("query", "")).lower() for w in ("music", "song", "audio", "sound effect", "soundtrack")):
+                        skipped += 1                               # not a picture request: it must not count as a failed picture
                         continue
                     p, how = None, "stock picture"
                     if str(req.get("kind", "image")) != "video":
@@ -225,6 +230,7 @@ def main(job):
                         if not p:
                             notes.append(f"stock '{req.get('query')}': {note}")
                             pic_report.append(f"{req.get('query')}: NO PICTURE")
+                            retry.append((req, str(req.get("prompt") or "").strip() or str(req.get("query", ""))))
                             continue
                     final, info, flags = A.analyze(p, work)
                     name = os.path.basename(final)
@@ -234,9 +240,40 @@ def main(job):
                     info["phrase"] = str(req.get("phrase") or "") or checker.phrase_for(req.get("query", ""), spoken)
                     registry[name], paths[name] = info, final
                     got += 1
+                if retry:                                          # a picture must never be missing: second chance with softer, simpler wording after a short rest
+                    import time
+                    time.sleep(30)
+                    for req, ap in retry:
+                        got_it = False
+                        said = str(req.get("phrase") or req.get("query") or "")
+                        soft = re.sub(r"\b(lying|laying)\b", "resting", ap, flags=re.I)
+                        soft = re.sub(r"\b(sleeping|asleep)\b", "resting peacefully", soft, flags=re.I)
+                        soft = re.sub(r"\bsleep\b", "rest", soft, flags=re.I)
+                        soft = re.sub(r"\bbed\b", "bedroom", soft, flags=re.I)
+                        variants = [soft, f"Photorealistic cinematic photo that shows: {said}. Warm natural light, vertical 9:16, no text."]
+                        for v in variants:
+                            p, prov = imagegen.generate(v, plan.get("aspect"), adir, re.sub(r"[^A-Za-z0-9_-]", "", str(req.get("id", "pic"))) or "pic", exact=True, rounds=2)
+                            if p:
+                                final, info, flags = A.analyze(p, work)
+                                name = os.path.basename(final)
+                                info["flags"], info["origin"] = flags, f"AI picture ({prov}) second try for: {req.get('query')}"
+                                info["query"] = str(req.get("query", ""))
+                                info["phrase"] = str(req.get("phrase") or "") or checker.phrase_for(req.get("query", ""), spoken)
+                                registry[name], paths[name] = info, final
+                                got += 1
+                                got_it = True
+                                if f"{req.get('query')}: NO PICTURE" in pic_report:
+                                    pic_report[pic_report.index(f"{req.get('query')}: NO PICTURE")] = prov + " (2nd try)"
+                                break
+                        if not got_it:
+                            lost.append(req)
                 mon.done_stage("stock", f"{got} of {len(plan['stock'])}")
-                if got < len(plan["stock"]):
-                    tg.send("⚠️ Some pictures could not be made (reason after each):\n" + "\n".join("- " + n for n in notes if n.startswith(("stock", "AI picture")))[:1500])
+                if got < len(plan["stock"]) - skipped:
+                    lines = [f"- '{str(r.get('query'))[:40]}': " + imagegen.reasons_for(re.sub(r"[^A-Za-z0-9_-]", "", str(r.get("id", "pic"))) or "pic") for r in lost] or [n for n in notes if n.startswith(("stock", "AI picture"))] or ["no reason was reported (see the Actions log, step 'Make the video')"]
+                    tg.send(f"⚠️ {len(plan['stock']) - skipped - got} of {len(plan['stock']) - skipped} pictures could not be made, even after a second try. Reason for each:\n" + "\n".join(lines)[:1700]
+                            + "\n\nProviders: " + " | ".join(imagegen.summary()) + "\nFix: check the key or credit of the provider named above, or send /edit with your own picture for that scene.")
+                elif imagegen.LOG and any(not e["ok"] for e in imagegen.LOG):
+                    tg.send("🖼️ All pictures made. Some tries failed on the way (the studio recovered): " + " | ".join(imagegen.summary()))
             for nm in plan.get("cutout", [])[:4]:
                 key = next((k for k in registry if k == nm or k.startswith(os.path.splitext(nm)[0])), None)
                 if key and registry[key]["kind"] == "image":
