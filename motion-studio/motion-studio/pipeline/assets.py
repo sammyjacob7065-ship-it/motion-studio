@@ -271,3 +271,60 @@ def describe_images(infos, paths, groq_chat):
             info["describe"] = parse_json(ans)
         except Exception:  # noqa: BLE001
             continue
+
+
+def cutout(path, out_path=None):
+    """Makes a product picture float: when the picture sits on a plain, even background (a studio shot, a white or light backdrop), that background is
+    removed (flood-filled from the edges, so white parts INSIDE the product stay) and the product is saved as a transparent PNG with soft edges.
+    Returns the new path, or None when the background is not plain enough (the original is then used as it is)."""
+    from PIL import ImageDraw, ImageFilter
+    try:
+        im0 = ImageOps.exif_transpose(Image.open(path))
+        if im0.mode in ("RGBA", "LA") and im0.getchannel("A").getextrema()[0] < 250:
+            return None                                       # already transparent
+        im0 = im0.convert("RGB")
+        W0, H0 = im0.size
+        s = min(1.0, 900.0 / max(W0, H0))
+        im = im0.resize((max(2, int(W0 * s)), max(2, int(H0 * s))), Image.LANCZOS) if s < 1 else im0.copy()
+        w, h = im.size
+        # is the border plain? sample 60 points around the edge
+        pts = [(int(w * i / 20), 0) for i in range(20)] + [(int(w * i / 20), h - 1) for i in range(20)] + [(0, int(h * i / 20)) for i in range(20)] + [(w - 1, int(h * i / 20)) for i in range(20)]
+        cols = [im.getpixel(p) for p in pts]
+        med = tuple(sorted(c[k] for c in cols)[len(cols) // 2] for k in range(3))
+        far = sum(1 for c in cols if max(abs(c[k] - med[k]) for k in range(3)) > 70)
+        if far > len(cols) * 0.25:
+            return None                                       # busy background: cannot be cut out this way
+        mark = (255, 0, 255)
+        work = im.copy()
+        thresh = 46
+        for p in pts[::3]:
+            if work.getpixel(p) == mark:
+                continue
+            if max(abs(work.getpixel(p)[k] - med[k]) for k in range(3)) > 70:
+                continue
+            ImageDraw.floodfill(work, p, mark, thresh=thresh)
+        mask = Image.new("L", (w, h), 255)                    # 255 = keep (product), 0 = background
+        wp, mp = work.load(), mask.load()
+        gone = 0
+        for y in range(h):
+            for x in range(w):
+                if wp[x, y] == mark:
+                    mp[x, y] = 0
+                    gone += 1
+        frac = gone / float(w * h)
+        if frac < 0.08 or frac > 0.93:
+            return None                                       # nothing removed, or the product itself was eaten
+        mask = mask.filter(ImageFilter.MedianFilter(5)).filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(1.3))
+        mask = mask.resize((W0, H0), Image.LANCZOS)
+        rgba = im0.convert("RGBA")
+        rgba.putalpha(mask)
+        box = mask.point(lambda v: 255 if v > 24 else 0).getbbox()
+        if box:
+            pad = int(max(W0, H0) * 0.01)
+            rgba = rgba.crop((max(0, box[0] - pad), max(0, box[1] - pad), min(W0, box[2] + pad), min(H0, box[3] + pad)))
+        out = out_path or (os.path.splitext(path)[0] + "_cut.png")
+        rgba.save(out, "PNG")
+        return out
+    except Exception as e:  # noqa: BLE001
+        print("::warning::cut-out skipped:", str(e)[:120])
+        return None
