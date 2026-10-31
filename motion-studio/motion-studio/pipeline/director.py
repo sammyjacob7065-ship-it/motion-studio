@@ -39,6 +39,33 @@ SMALL_REQUEST = 5500          # a request estimated above this many tokens is wr
 PART_SECONDS = 9.0
 
 
+def _use_gemini():
+    try:
+        import gemini
+        return gemini.available() and env("GEMINI_FOR_DIRECTOR", "1") != "0"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _limit(extra=0):
+    """How big a request may be before it must be written in parts: Gemini takes the whole thing, the free Groq plan only a small one."""
+    return 10 ** 9 if _use_gemini() else int(env("SMALL_REQUEST", str(SMALL_REQUEST))) + extra
+
+
+def _chat(messages, temperature=0.4, max_tokens=6000, reasoning=None):
+    """Gemini first (big answers, big input), Groq as the backup. Returns JSON text, like groq.chat."""
+    if _use_gemini():
+        try:
+            import gemini
+            system = next((m["content"] for m in messages if m.get("role") == "system"), None)
+            user = "\n\n".join(str(m["content"]) for m in messages if m.get("role") != "system")
+            obj = gemini.parse_json(gemini.generate(user, system=system, temperature=temperature, max_tokens=max(int(max_tokens), 16000), rounds=2))
+            return json.dumps(obj)
+        except Exception as e:  # noqa: BLE001
+            print("::warning::Gemini could not answer, using Groq:", str(e)[:140])
+    return groq.chat(messages, temperature=temperature, max_tokens=max_tokens, reasoning=reasoning)
+
+
 def asset_table(registry):
     if not registry:
         return "(no files supplied)"
@@ -147,7 +174,7 @@ def plan(prompt, registry, urls_note=""):
     user = f"CLIENT BRIEF (verbatim):\n<<<\n{prompt}\n>>>\n\nSUPPLIED FILES:\n{asset_table(registry)}\n{urls_note}"
     for _ in range(3):
         try:
-            return _repair_plan(groq.parse_json(groq.chat([{"role": "system", "content": PLAN_SYSTEM}, {"role": "user", "content": user}], temperature=0.3, max_tokens=4000, reasoning="medium")), prompt)
+            return _repair_plan(groq.parse_json(_chat([{"role": "system", "content": PLAN_SYSTEM}, {"role": "user", "content": user}], temperature=0.3, max_tokens=4000, reasoning="medium")), prompt)
         except Exception as e:  # noqa: BLE001
             err = e
     raise RuntimeError(f"Director could not plan: {err}")
@@ -191,10 +218,16 @@ def timeline(prompt, plan_json, registry, words, voice_start, size, sfx_names, m
         f"CAPTIONS: {'add one captions layer (words_from voice)' if plan_json.get('captions') and words else 'only if the brief asks'}\n"
         f"SOUND EFFECTS AVAILABLE: {', '.join(sfx_names)}\n{extra}"
     )
-    if est_tokens(system_prompt(), user) > int(env("SMALL_REQUEST", str(SMALL_REQUEST))):
+    if est_tokens(system_prompt(), user) > _limit():
         return _timeline_in_parts(user, prompt, plan_json, registry, words, voice_start, size, sfx_names, dur), user
-    ans = groq.chat([{"role": "system", "content": system_prompt()}, {"role": "user", "content": user}], temperature=0.45, max_tokens=14000, reasoning="high")
-    return _split(groq.parse_json(ans)), user
+    try:
+        ans = _chat([{"role": "system", "content": system_prompt()}, {"role": "user", "content": user}], temperature=0.45, max_tokens=14000, reasoning="high")
+        return _split(groq.parse_json(ans)), user
+    except Exception as e:  # noqa: BLE001
+        if est_tokens(system_prompt(), user) > int(env("SMALL_REQUEST", str(SMALL_REQUEST))):      # Gemini and Groq both failed on a big request: write it in small parts
+            print("::warning::the whole timeline could not be written in one go, writing it in parts:", str(e)[:120])
+            return _timeline_in_parts(user, prompt, plan_json, registry, words, voice_start, size, sfx_names, dur), user
+        raise
 
 
 def _layer_line(l):
@@ -286,7 +319,7 @@ def image_department(brief_text, plan, supplied_images, have_video=False, has_mu
         african = bool(re.search(r"nigeria|lagos|abuja|naira|ibadan|africa|ghana|kenya", text, re.I))
         pics = []
         try:
-            ans = groq.chat([{"role": "system", "content": "You are the picture editor of a professional advert studio. You write precise image prompts."},
+            ans = _chat([{"role": "system", "content": "You are the picture editor of a professional advert studio. You write precise image prompts."},
                              {"role": "user", "content": f"Brief: {context}\n\nWrite {need} different image prompts for a {int(d)}-second video with music, one picture per scene, in the order of the story of the brief. Each prompt is one sentence "
                               "(subject, place, light, camera angle) and must show something the brief is about. No text, no logos." + (" People and places are African/Nigerian." if african else "") + '\nReply JSON only: {"pictures":[{"prompt":"photorealistic ..."}]}'}],
                             temperature=0.5, max_tokens=1500, reasoning="low")
@@ -310,7 +343,7 @@ def image_department(brief_text, plan, supplied_images, have_video=False, has_mu
                f"Choose {need} voice-over sentences or ideas that deserve a picture on screen, spread across the whole video. For each give the exact words of that voice line and an image prompt: one sentence that describes the picture the viewer should SEE while that line is spoken "
                "(subject, place, light, camera angle). It must show what the words say, never something else. No text, no logos, no people's faces in close-up unless the line is about people." + (" People and places are African/Nigerian." if african else "") +
                '\nReply JSON only: {"pictures":[{"phrase":"exact words","prompt":"photorealistic ... "}]}')
-        ans = groq.chat([{"role": "system", "content": "You are the picture editor of a professional advert studio. You write precise image prompts."}, {"role": "user", "content": msg}], temperature=0.4, max_tokens=1500, reasoning="low")
+        ans = _chat([{"role": "system", "content": "You are the picture editor of a professional advert studio. You write precise image prompts."}, {"role": "user", "content": msg}], temperature=0.4, max_tokens=1500, reasoning="low")
         for it in (groq.parse_json(ans).get("pictures") or [])[:need]:
             if isinstance(it, dict) and str(it.get("prompt") or "").strip():
                 pics.append({"phrase": str(it.get("phrase") or "")[:200], "prompt": str(it["prompt"]).strip()[:600]})
@@ -373,7 +406,7 @@ def _timeline_in_parts(user, prompt, plan_json, registry, words, voice_start, si
         for attempt in range(0 if tl is not None else 2):
             ask = msg if attempt == 0 else msg + "- YOUR LAST ANSWER WAS CUT OFF OR INVALID. Answer again with a SHORTER part: at most 8 layers, no long descriptions, valid JSON only.\n"
             try:
-                ans = groq.chat([{"role": "system", "content": sysmsg}, {"role": "user", "content": ask}], temperature=0.45, max_tokens=4500, reasoning="low")
+                ans = _chat([{"role": "system", "content": sysmsg}, {"role": "user", "content": ask}], temperature=0.45, max_tokens=4500, reasoning="low")
                 tl, au, nt = _split(groq.parse_json(ans))
                 break
             except ValueError:
@@ -416,9 +449,9 @@ def repair(prev_tl, prev_audio, problems, original_user):
         + "\n\nPROBLEMS FOUND (fix them all, keep everything else exactly as it is, and still follow the brief):\n" + "\n".join("- " + p for p in problems)
         + "\n\nReply with the full corrected JSON object."
     )
-    if est_tokens(system_prompt(), msg) > int(env("SMALL_REQUEST", str(SMALL_REQUEST))) + 1500:
+    if est_tokens(system_prompt(), msg) > _limit(1500):
         return prev_tl, prev_audio, "A fix round was skipped: the request was too big for the free Groq plan."
-    ans = groq.chat([{"role": "system", "content": system_prompt()}, {"role": "user", "content": msg}], temperature=0.3, max_tokens=14000, reasoning="high")
+    ans = _chat([{"role": "system", "content": system_prompt()}, {"role": "user", "content": msg}], temperature=0.3, max_tokens=14000, reasoning="high")
     return _split(groq.parse_json(ans))
 
 
@@ -497,7 +530,7 @@ def coverage(requirements, tl, audio, notes="", facts=""):
     sys_msg = 'You check a finished motion graphics timeline against the client requirements. Reply JSON only: {"results":[{"n":1,"status":"done|simplified|missing","note":"short, only if not done"}]}. "done" only if the timeline clearly does it, or if the studio facts say it was done.'
     user = "REQUIREMENTS:\n" + "\n".join(f"{i + 1}. {r}" for i, r in enumerate(requirements)) + "\n\nTIMELINE:\n" + summarize_timeline(tl) + "\n\nAUDIO EVENTS:\n" + "\n".join(f"{a.get('role')} {a.get('sfx') or a.get('asset', '')} @{a.get('start', 0)}" for a in audio or []) + (f"\n\nDIRECTOR NOTES: {notes}" if notes else "") + (f"\n\nTHE STUDIO ALSO ADDED (count these as done): {facts}" if facts else "")
     try:
-        res = groq.parse_json(groq.chat([{"role": "system", "content": sys_msg}, {"role": "user", "content": user}], temperature=0.1, max_tokens=2500, reasoning="low")).get("results", [])
+        res = groq.parse_json(_chat([{"role": "system", "content": sys_msg}, {"role": "user", "content": user}], temperature=0.1, max_tokens=2500, reasoning="low")).get("results", [])
     except Exception:  # noqa: BLE001
         return []
     out = []
