@@ -211,7 +211,7 @@ def main(job):
                 skipped = 0
                 lost = []
                 spoken = str((plan.get("voiceover") or {}).get("text", "")) or str(brief.get("prompt", ""))
-                for req in plan["stock"][:10]:
+                for req in plan["stock"][:24]:
                     if any(w in str(req.get("query", "")).lower() for w in ("music", "song", "audio", "sound effect", "soundtrack")):
                         skipped += 1                               # not a picture request: it must not count as a failed picture
                         continue
