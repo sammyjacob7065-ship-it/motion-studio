@@ -105,6 +105,7 @@ def main(job):
             brief["assets"] = [x for x in brief["assets"] if x not in scripts]
     except Exception as e:  # noqa: BLE001
         print("script file not read:", e)
+    director.ANIM_ON = any(director._ANIM.match(ln) or (director._PART.match(ln) and not re.match(r"^(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|i|ii|iii|iv|v|vi|1st|2nd|3rd)$", director._PART.match(ln).group(1).strip(), re.I)) for ln in str(brief.get("prompt", "")).splitlines())
     wm_text = str(brief.get("watermark") or env("WATERMARK") or "")
     _m = re.search(r"^[ \t]*WATERMARK[ \t]*:[ \t]*(.+?)[ \t]*$", str(brief.get("prompt", "")), re.I | re.M)
     if _m:                                                         # a line "WATERMARK: name" in the script: used as the brand mark, and not shown as a text
@@ -211,7 +212,7 @@ def main(job):
                 skipped = 0
                 lost = []
                 spoken = str((plan.get("voiceover") or {}).get("text", "")) or str(brief.get("prompt", ""))
-                for req in plan["stock"][:24]:
+                for req in plan["stock"][:40]:
                     if any(w in str(req.get("query", "")).lower() for w in ("music", "song", "audio", "sound effect", "soundtrack")):
                         skipped += 1                               # not a picture request: it must not count as a failed picture
                         continue
@@ -219,6 +220,8 @@ def main(job):
                     if str(req.get("kind", "image")) != "video":
                         said = str(req.get("phrase") or "")
                         ai_prompt = str(req.get("prompt") or "").strip() or (str(req.get("query", "")) + (", " + said if said else ""))
+                        if req.get("anim") or req.get("cutout"):      # an animated product or a separate part: one object on a plain white background, so it can be cut out
+                            ai_prompt = ai_prompt.rstrip(". ") + ". Single isolated object, fully visible and centred, on a plain pure white seamless studio background, soft even light, no shadow, no text, no logo."
                         p, prov = imagegen.generate(ai_prompt, plan.get("aspect"), adir, re.sub(r"[^A-Za-z0-9_-]", "", str(req.get("id", "pic"))) or "pic", exact=bool(req.get("exact")))
                         if p:
                             how = f"AI picture ({prov})"
@@ -232,9 +235,20 @@ def main(job):
                             pic_report.append(f"{req.get('query')}: NO PICTURE")
                             retry.append((req, str(req.get("prompt") or "").strip() or str(req.get("query", ""))))
                             continue
+                    if req.get("anim") or req.get("cutout"):
+                        try:
+                            cp = A.cutout(p)
+                            if cp:
+                                p = cp
+                        except Exception as e:  # noqa: BLE001
+                            print("::warning::cut-out skipped:", str(e)[:100])
                     final, info, flags = A.analyze(p, work)
                     name = os.path.basename(final)
                     info["flags"], info["origin"] = flags, f"{how} for: {req.get('query')}"
+                    if req.get("part"):
+                        info["part"] = str(req["part"])
+                    if req.get("anim"):
+                        info["animated"] = str(req["anim"])[:200]
                     pic_report.append(how.replace("AI picture ", "").strip("()") if how != "stock picture" else "stock")
                     info["query"] = str(req.get("query", ""))
                     info["phrase"] = str(req.get("phrase") or "") or checker.phrase_for(req.get("query", ""), spoken)
@@ -408,6 +422,53 @@ def main(job):
             extra += (f"STYLE REFERENCE (a video the client likes; its length {ref.get('duration', 0):.0f}s, pace {ref.get('pace', '')}, look: {ref.get('style', '')}, music: {ref.get('music', '')}). Build the NEW video with the SAME structure: about {len(ref['scenes'])} scenes, "
                       f"the same rhythm (scene lengths close to these), the same kind of text animation, camera moves and transitions. Use ONLY the client's own words, brand, pictures and logo; never copy anything written in the reference.\n{lines}\n")
             mon.note("plan", f"style reference used: {len(ref['scenes'])} scenes")
+        _cut_cache = {}
+
+        def _cut_asset(name):
+            """A product picture on a plain background becomes a floating cut-out (transparent PNG); anything else stays as it is."""
+            if name in _cut_cache:
+                return _cut_cache[name]
+            res = name
+            try:
+                a = registry.get(name) or {}
+                if a.get("kind") == "image" and not a.get("alpha") and name in paths:
+                    cp = A.cutout(paths[name])
+                    if cp:
+                        final, info, flags = A.analyze(cp, work)
+                        nm = os.path.basename(final)
+                        info["flags"], info["origin"] = flags, f"cut-out of {name}"
+                        for k in ("query", "phrase", "part"):
+                            if a.get(k):
+                                info[k] = a[k]
+                        registry[nm], paths[nm] = info, final
+                        res = nm
+            except Exception as e:  # noqa: BLE001
+                print("::warning::cut-out failed for", name, str(e)[:100])
+            _cut_cache[name] = res
+            return res
+
+        def _cut_layers(layers, inside_group=False):
+            for l in layers:
+                p_ = l.get("props") or {}
+                if l.get("type") == "magic" and p_.get("asset"):
+                    p_["asset"] = _cut_asset(p_["asset"])
+                    p_["items"] = [_cut_asset(i) for i in (p_.get("items") or [])]
+                    a = registry.get(p_["asset"]) or {}
+                    if a.get("width") and a.get("height"):
+                        p_["aspect"] = round(a["height"] / a["width"], 4)
+                elif l.get("type") == "image" and p_.get("asset") and (inside_group or p_.get("cutout")) and p_.get("cutout") is not False:
+                    p_["asset"] = _cut_asset(p_["asset"])
+                elif l.get("type") == "group":
+                    _cut_layers(p_.get("children") or [], True)
+
+        def _normalize(*a, **k):
+            tl_, w_ = T.normalize(*a, **k)
+            try:
+                _cut_layers(tl_.get("layers", []))
+            except Exception as e:  # noqa: BLE001
+                print("::warning::cut-out step skipped:", str(e)[:120])
+            return tl_, w_
+
         def speech_off(t):
             """Where the speech starts on the timeline: the voice-over start, or the place of the talking video."""
             if talk:
@@ -447,23 +508,23 @@ def main(job):
                     l["props"]["asset"] = made[a_]
             new_tl.setdefault("aspect", plan.get("aspect", "9:16"))
             raw_tl, user_msg = new_tl, ""
-            tl, warns = T.normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
+            tl, warns = _normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
             tg.send("✏️ Edit understood: " + str(dnotes)[:500] + "\nRendering the new version now.")
         elif ck_tl and ck_tl.get("raw_tl"):
             raw_tl, raw_audio, dnotes, user_msg = ck_tl["raw_tl"], ck_tl.get("raw_audio"), ck_tl.get("dnotes"), ck_tl.get("user_msg", "")
-            tl, warns = T.normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
+            tl, warns = _normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
             resumed.append("timeline")
         else:
             (raw_tl, raw_audio, dnotes), user_msg = director.timeline(brief["prompt"], plan, registry, words, T0, size, mix.SFX_NAMES, min_duration=min_dur, extra=extra)
             raw_tl.setdefault("aspect", plan.get("aspect", "9:16"))
-            tl, warns = T.normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
+            tl, warns = _normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
             problems = warns + T.check_layout(tl, registry)
             for _ in range(2):
                 if not problems:
                     break
                 raw_tl, raw_audio, dn2 = director.repair(raw_tl, raw_audio, problems, user_msg)
                 raw_tl.setdefault("aspect", plan.get("aspect", "9:16"))
-                tl, warns = T.normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
+                tl, warns = _normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
                 problems = warns + T.check_layout(tl, registry)
                 dnotes = dn2 or dnotes
             _ck_save(store, job, "timeline", {"raw_tl": raw_tl, "raw_audio": raw_audio, "dnotes": dnotes, "user_msg": user_msg})
@@ -530,7 +591,7 @@ def main(job):
                         mon.note("review", f"fixing {len(major)} problem(s)")
                         raw_tl, raw_audio, dn3 = director.repair(raw_tl, raw_audio, major, user_msg)
                         raw_tl.setdefault("aspect", plan.get("aspect", "9:16"))
-                        tl2, warns2 = T.normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
+                        tl2, warns2 = _normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
                         if not T.check_layout(tl2, registry) and len(tl2["layers"]) >= max(3, len(tl["layers"]) // 2):
                             tl, raw_audio, sync_lines = sync_check(tl2, raw_audio)
                             fill_captions(tl)
