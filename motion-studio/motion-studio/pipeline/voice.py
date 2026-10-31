@@ -190,3 +190,22 @@ def _generate_plain(text, out_path, workdir, voice, speed, base):
     if r.returncode != 0:
         raise RuntimeError("could not join voice parts: " + r.stderr[-150:])
     return out_path
+
+
+def words_for(path):
+    """Word times for a voice file (the captions, labels and pictures are timed from these). Long files are split into 10-minute pieces."""
+    import assets
+    dur = assets.duration_of(path)
+    if dur <= 600:
+        w, text, _ = groq.transcribe_words(path)
+        return w, text, dur
+    words, texts = [], []
+    off = 0.0
+    while off < dur:
+        piece = path + f".p{int(off)}.mp3"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", str(off), "-t", "600", "-i", path, "-ac", "1", "-ar", "16000", "-b:a", "48k", piece], check=True)
+        w, t, _ = groq.transcribe_words(piece)
+        words += [{"w": x["w"], "s": round(x["s"] + off, 3), "e": round(x["e"] + off, 3)} for x in w]
+        texts.append(t)
+        off += 600
+    return words, " ".join(texts), dur
