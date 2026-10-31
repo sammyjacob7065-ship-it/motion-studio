@@ -173,7 +173,44 @@ def _generate_tight(text, out_path, workdir, voice, speed, base):
     return out_path
 
 
+def _shorten_gaps(path):
+    """The engine rests too long after a full stop. Any silence longer than VOICE_MAX_GAP (default 0.55 s) is cut down to VOICE_GAP_KEEP (default 0.32 s).
+    Speech itself is not touched. Never fails the job."""
+    try:
+        longest = float(_setting("VOICE_MAX_GAP", "0.55"))
+        keep = float(_setting("VOICE_GAP_KEEP", "0.32"))
+        if longest <= 0:
+            return
+        r = subprocess.run(["ffmpeg", "-i", path, "-af", f"silencedetect=n=-45dB:d={longest}", "-f", "null", "-"], capture_output=True, text=True)
+        starts = [float(x) for x in re.findall(r"silence_start: ([0-9.]+)", r.stderr)]
+        ends = [float(x) for x in re.findall(r"silence_end: ([0-9.]+)", r.stderr)]
+        total = _dur(path)
+        cuts = []
+        for k, st in enumerate(starts):
+            en = ends[k] if k < len(ends) else total
+            if st < 0.3 or en >= total - 0.05:
+                continue                                      # never touch the very start or the very end
+            if en - st > keep + 0.05:
+                cuts.append((st + keep, en))
+        if not cuts:
+            return
+        expr = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in cuts)
+        tmp = path + ".gap.mp3"
+        _sh(["ffmpeg", "-y", "-loglevel", "error", "-i", path, "-af", f"aselect='not({expr})',asetpts=N/SR/TB", "-c:a", "libmp3lame", "-b:a", "192k", tmp])
+        if _dur(tmp) > 1.0:
+            os.replace(tmp, path)
+            print(f"voice pauses shortened: {len(cuts)} gaps, {total - _dur(path):.1f}s removed")
+    except Exception as e:  # noqa: BLE001
+        print("::warning::pause shortening skipped:", str(e)[:120])
+
+
 def _generate_plain(text, out_path, workdir, voice, speed, base):
+    _generate_plain_raw(text, out_path, workdir, voice, speed, base)
+    _shorten_gaps(out_path)
+    return out_path
+
+
+def _generate_plain_raw(text, out_path, workdir, voice, speed, base):
     parts = []
     for i, c in enumerate(_chunks(text)):
         p = os.path.join(workdir, f"tts_{i}.mp3")
