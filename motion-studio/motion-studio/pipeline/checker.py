@@ -486,6 +486,9 @@ def watermark(tl, spec):
     return True
 
 
+LAND_SOUND = {"name": "hit"}      # the sound when a counter lands: run.py sets it from the script ("hit" only when the script itself uses a hit; calm ads get a soft sparkle)
+
+
 def sound_design(tl, audio):
     """Makes the sound track active: a counting sound while a number rolls (and a hit when it lands), a whoosh at every picture change,
     a pop when a label appears, a shimmer on the last scene. Only adds a sound where the director put none close by."""
@@ -514,8 +517,9 @@ def sound_design(tl, audio):
         t0 = l["start"] + float(p.get("delay") or 0)
         ev[:] = [a for a in ev if not (a.get("sfx") in ("tick", "click") and t0 - 0.2 <= float(a.get("start", -9)) <= t0 + d + 0.1)]   # one counting sound, not many single ticks
         add("roll", t0, 0.45, dur=round(min(d + 0.1, 1.7), 2))
-        if not near(t0 + d, 0.3, ("hit",)):
-            add("hit", t0 + d, 0.7)
+        land = LAND_SOUND["name"]
+        if not near(t0 + d, 0.3, ("hit", "sparkle", "shimmer", "pop", "click")):
+            add(land, t0 + d, 0.7 if land == "hit" else 0.5)
         added["counting"] += 1
     pics = sorted([l for l in layers if _fullbleed(l, W) and not _is_ambient(l, dur)], key=lambda x: x["start"])
     for k, pic in enumerate(pics[1:], 1):
