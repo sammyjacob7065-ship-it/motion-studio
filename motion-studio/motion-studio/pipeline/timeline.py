@@ -8,15 +8,17 @@ import copy
 import math
 import re
 
-ALLOWED_TYPES = {"image", "video", "text", "shape", "icon", "line", "particles", "counter", "captions", "transition"}
+ALLOWED_TYPES = {"image", "video", "text", "shape", "icon", "line", "particles", "counter", "captions", "transition", "magic", "group"}
 EASES = {"linear", "in", "out", "inOut", "inQuad", "outQuad", "inOutQuad", "outQuart", "inOutQuart", "outExpo", "inExpo",
-         "inOutExpo", "outBack", "inBack", "outElastic", "spring"}
+         "inOutExpo", "outBack", "inBack", "outElastic", "spring", "outBounce", "inBounce"}
 PRESETS = {"none", "fade", "slideUp", "slideDown", "slideLeft", "slideRight", "scaleIn", "zoomIn", "pop", "blurIn", "wipe",
            "rotateIn", "drop", "riseGlow", "draw"}
 ICONS = {"shield", "check", "lock", "card", "bolt", "globe", "phone", "coin", "arrow", "star", "play", "wifi", "user",
          "chart", "heart", "mail", "clock", "home", "bell", "cart"}
 FONTS = {"Inter", "Poppins", "Montserrat", "Space Grotesk", "Playfair Display", "Bebas Neue", "Oswald", "DM Sans", "Outfit", "Sora", "Anton"}
 SIZES = {"9:16": (1080, 1920), "16:9": (1920, 1080), "1:1": (1080, 1080), "4:5": (1080, 1350)}
+MAGIC_KINDS = {"box_open", "table_rise", "drop", "roll_in", "cap_pop", "spin_float", "fly_in", "burst", "fizz", "splash", "steam"}
+MAGIC_NO_ASSET = {"burst", "fizz", "splash", "steam"}
 NARROW_FONTS = {"bebasneue", "anton", "oswald"}
 
 
@@ -237,6 +239,35 @@ def normalize(tl, assets, voice_len=None, tail=1.2):
                 warn.append(f"layer '{lid}': a line needs at least 2 points, dropped")
                 continue
             props["points"] = pts
+        elif typ == "magic":
+            kind = str(props.get("kind") or "spin_float")
+            if kind not in MAGIC_KINDS:
+                warn.append(f"layer '{lid}': magic kind '{kind}' is not known, using spin_float")
+                kind = "spin_float"
+            props["kind"] = kind
+            if kind not in MAGIC_NO_ASSET:
+                a = find_asset(props.get("asset"))
+                if not a or assets[a].get("kind") != "image":
+                    warn.append(f"layer '{lid}': magic picture '{props.get('asset')}' not found, layer dropped")
+                    continue
+                props["asset"] = a
+                aw, ah = _num(assets[a].get("width"), 0), _num(assets[a].get("height"), 0)
+                props["aspect"] = round(ah / aw, 4) if aw and ah else 1.0
+                its = []
+                for it in props.get("items") or []:
+                    ia = find_asset(it)
+                    if ia and assets[ia].get("kind") == "image":
+                        its.append(ia)
+                props["items"] = its[:8]
+            props["speed"] = min(3.0, max(0.4, _num(props.get("speed"), 1.0)))
+        elif typ == "group":
+            kids = [c for c in (props.get("children") or []) if isinstance(c, dict)][:40]
+            sub, w2 = normalize({"width": W, "height": H, "fps": fps, "duration": duration, "layers": kids}, assets)
+            warn += [f"group '{lid}': {w}" for w in w2]
+            props["children"] = sub["layers"]
+            if not props["children"]:
+                warn.append(f"group '{lid}' has no usable parts, dropped")
+                continue
         elif typ == "particles":
             props["count"] = int(min(260, max(1, _num(props.get("count"), 60))))
         elif typ == "captions":
