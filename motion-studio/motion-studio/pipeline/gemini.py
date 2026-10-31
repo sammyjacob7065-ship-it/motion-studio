@@ -79,7 +79,7 @@ def _text(resp):
     return "".join(out).strip()
 
 
-def generate(prompt, system=None, json_mode=True, video=None, video_mime="video/mp4", temperature=0.3, max_tokens=32000, rounds=3):
+def generate(prompt, system=None, json_mode=True, video=None, video_mime="video/mp4", temperature=0.3, max_tokens=32000, rounds=3, images=None):
     """Returns the answer text. video = bytes of a video (up to about 20 MB) shown to the model together with the prompt."""
     ks = keys()
     if not ks:
@@ -87,6 +87,8 @@ def generate(prompt, system=None, json_mode=True, video=None, video_mime="video/
     parts = [{"text": prompt}]
     if video:
         parts.insert(0, {"inline_data": {"mime_type": video_mime, "data": base64.b64encode(video).decode()}})
+    for im in (images or []):                                  # pictures (bytes, mime) shown to the model
+        parts.insert(0, {"inline_data": {"mime_type": im[1], "data": base64.b64encode(im[0]).decode()}})
     body = {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens}}
     if json_mode:
         body["generationConfig"]["responseMimeType"] = "application/json"
