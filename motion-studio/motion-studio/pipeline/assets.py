@@ -237,7 +237,14 @@ def describe_images(infos, paths, groq_chat):
     """Short description of each picture so the director knows what it is looking at (vision model, optional)."""
     from groq import parse_json
     model = env("VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
-    for name, info in list(infos.items())[:8]:
+    ASK = ('Describe this picture for a video editor. Read any text printed on it (brand and product names). '
+           'Reply JSON only: {"what":"one short sentence that includes the product name if it is a product, e.g. Immunosin herbal capsule box","product_name":"name printed on the product or empty","has_text":true/false,"is_logo":true/false,"has_person":true/false,"background":"transparent|plain|busy"}')
+    try:
+        import gemini
+        use_gem = gemini.available()
+    except Exception:  # noqa: BLE001
+        gemini, use_gem = None, False
+    for name, info in list(infos.items())[:16]:
         if info.get("kind") != "image" or name.endswith(".svg"):
             continue
         try:
@@ -246,6 +253,16 @@ def describe_images(infos, paths, groq_chat):
             import io
             buf = io.BytesIO()
             im.save(buf, "JPEG", quality=82)
+            if use_gem:                                          # Gemini looks at the picture first (reads the product names well)
+                try:
+                    d = gemini.parse_json(gemini.generate(ASK, images=[(buf.getvalue(), "image/jpeg")], temperature=0.1, max_tokens=400, rounds=2))
+                    if isinstance(d, dict) and d.get("what"):
+                        if d.get("product_name") and str(d["product_name"]).lower() not in str(d["what"]).lower():
+                            d["what"] = f"{d['what']} ({d['product_name']})"
+                        info["describe"] = d
+                        continue
+                except Exception as e:  # noqa: BLE001
+                    print("::warning::Gemini could not look at", name, str(e)[:80])
             b64 = base64.b64encode(buf.getvalue()).decode()
             msg = [{"role": "user", "content": [
                 {"type": "text", "text": 'Describe this picture for a video editor. Reply JSON only: {"what":"one short sentence","has_text":true/false,"is_logo":true/false,"has_person":true/false,"background":"transparent|plain|busy"}'},
