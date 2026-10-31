@@ -24,9 +24,7 @@ jobs:
           sudo apt-get install -y ffmpeg
 
       - name: Python packages
-        run: |
-          F=$(find . -name requirements.txt -path "*pipeline*" | head -1)
-          pip install -r "$F"
+        run: pip install requests pillow
 
       - name: Read the reference
         env:
