@@ -141,7 +141,7 @@ def generate(text, out_path, workdir, speed=None):
     base = _base()
     voice = _setting("TTS_VOICE", "en-NG-AbeoNeural")
     speed = float(speed) if speed else float(_setting("TTS_SPEED", "1.0"))
-    if _setting("VOICE_STYLE", "tight") != "plain":
+    if _setting("VOICE_STYLE", "plain") == "tight":
         try:
             return _generate_tight(text, out_path, workdir, voice, speed, base)
         except Exception as e:  # noqa: BLE001
