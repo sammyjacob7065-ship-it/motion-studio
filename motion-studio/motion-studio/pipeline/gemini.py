@@ -125,6 +125,31 @@ def generate(prompt, system=None, json_mode=True, video=None, video_mime="video/
     raise RuntimeError("Gemini failed: " + last)
 
 
+def _repair_commas(body):
+    """Fixes what models often get wrong in long JSON: a missing comma between two items (inserted where the parser stopped), trailing commas, '}{' side by side."""
+    fixed = re.sub(r",\s*([}\]])", r"\1", body)
+    fixed = re.sub(r"\}\s*\{", "},{", fixed)
+    fixed = re.sub(r"\]\s*\[", "],[", fixed)
+    for _ in range(200):
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError as e:
+            if "delimiter" in e.msg or "Expecting ','" in e.msg:
+                j = e.pos
+                while j > 0 and fixed[j - 1].isspace():
+                    j -= 1
+                fixed = fixed[:j] + "," + fixed[j:]
+                continue
+            print("::warning::JSON still broken near:", repr(fixed[max(0, e.pos - 60):e.pos + 40]))
+            break
+    try:
+        import json_repair                                    # optional helper package (pip install json-repair)
+        return json.loads(json_repair.repair_json(body))
+    except Exception:  # noqa: BLE001
+        pass
+    return json.loads(fixed)
+
+
 def parse_json(text):
     t = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(text).strip())
     a, b = t.find("{"), t.rfind("}")
@@ -134,7 +159,4 @@ def parse_json(text):
     try:
         return json.loads(body)
     except ValueError:
-        fixed = re.sub(r",\s*([}\]])", r"\1", body)                         # trailing commas
-        fixed = re.sub(r"\}\s*\{", "},{", fixed)                            # two objects side by side
-        fixed = re.sub(r"\]\s*\[", "],[", fixed)
-        return json.loads(fixed)
+        return _repair_commas(body)
