@@ -16,10 +16,17 @@ def prepare(timeline, asset_paths, work):
     shutil.rmtree(dest, ignore_errors=True)
     os.makedirs(dest, exist_ok=True)
     used = set()
-    for l in timeline["layers"]:
-        a = l.get("props", {}).get("asset")
-        if a:
-            used.add(a)
+
+    def collect(layers):
+        for l in layers:
+            pr = l.get("props", {}) or {}
+            if pr.get("asset"):
+                used.add(pr["asset"])
+            for it in pr.get("items") or []:
+                used.add(it)
+            if l.get("type") == "group":
+                collect(pr.get("children") or [])
+    collect(timeline["layers"])
     bg = timeline.get("background", {}).get("asset")
     if bg:
         used.add(bg)
