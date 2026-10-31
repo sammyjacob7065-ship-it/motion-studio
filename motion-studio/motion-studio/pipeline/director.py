@@ -60,8 +60,17 @@ def _chat(messages, temperature=0.4, max_tokens=6000, reasoning=None):
             system = next((m["content"] for m in messages if m.get("role") == "system"), None)
             user = "\n\n".join(str(m["content"]) for m in messages if m.get("role") != "system")
             ask, last = user, ""
-            for attempt in range(2):                           # a broken answer is asked for again once, with the error, before Groq is used
-                txt = gemini.generate(ask, system=system, temperature=temperature if attempt == 0 else 0.0, max_tokens=max(int(max_tokens), 16000), rounds=2)
+            for attempt in range(3):                           # a broken or refused answer is asked for again (with the error) before Groq is used
+                try:
+                    txt = gemini.generate(ask, system=system, temperature=temperature if attempt == 0 else 0.0, max_tokens=max(int(max_tokens), 16000), rounds=2)
+                except Exception as ge:  # noqa: BLE001
+                    last = str(ge)[:200]
+                    print(f"::warning::Gemini request failed (attempt {attempt + 1}): {last}")
+                    if attempt < 2:
+                        import time
+                        time.sleep(25)
+                        continue
+                    raise
                 try:
                     return json.dumps(gemini.parse_json(txt))
                 except Exception as pe:  # noqa: BLE001
@@ -70,7 +79,12 @@ def _chat(messages, temperature=0.4, max_tokens=6000, reasoning=None):
                     ask = user + f"\n\nIMPORTANT: your previous answer was NOT valid JSON ({last}). Answer again with the complete answer as STRICTLY valid JSON: double quotes, a comma between every two items, no comments, no trailing commas, nothing outside the JSON."
             raise RuntimeError("Gemini JSON stayed invalid: " + last)
         except Exception as e:  # noqa: BLE001
-            print("::warning::Gemini could not answer, using Groq:", str(e)[:140])
+            gem_err = str(e)[:300]
+            print("::warning::Gemini could not answer, using Groq:", gem_err)
+            try:
+                return groq.chat(messages, temperature=temperature, max_tokens=max_tokens, reasoning=reasoning)
+            except Exception as ge2:  # noqa: BLE001
+                raise RuntimeError(f"Gemini failed first: {gem_err} || then Groq: {str(ge2)[:200]}")
     return groq.chat(messages, temperature=temperature, max_tokens=max_tokens, reasoning=reasoning)
 
 
@@ -293,7 +307,7 @@ def pictures_from_brief(text):
             continue
         out.append({"id": f"pic{len(out) + 1}", "query": " ".join(re.sub(r"[^A-Za-z0-9 ]", " ", img).split()[:5]), "prompt": img[:900], "exact": True,
                     "phrase": " ".join(b["vo"].split())[:200], "kind": "image", "why": "written in the brief"})
-    return out[:12]
+    return out[:24]
 
 
 def image_department(brief_text, plan, supplied_images, have_video=False, has_music=False, dur_hint=None):
