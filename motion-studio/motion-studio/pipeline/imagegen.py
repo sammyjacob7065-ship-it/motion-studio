@@ -132,6 +132,56 @@ def _horde(prompt, aspect, wait=420):
 
 PROVIDERS = [("agnes", _agnes), ("cloudflare", _cloudflare), ("horde", _horde)]
 
+LOG = []        # every attempt: {pic, provider, ok, why}
+
+
+def plain(why):
+    """The reason in plain words (what the client can act on)."""
+    w = str(why or "").lower()
+    if re.search(r"no (agnes|cloudflare|horde) key", w):
+        return "key is missing in GitHub secrets"
+    if re.search(r"\b40[13]\b|unauthori|invalid (api )?(key|token)|authentication|revoked|forbidden", w):
+        return "key or token was refused (wrong, expired or revoked)"
+    if re.search(r"\b402\b|insufficient|balance|credit|quota|daily|neurons|exceeded|usage limit", w):
+        return "free limit or credit is used up"
+    if re.search(r"\b429\b|rate|too many", w):
+        return "too many requests at once (rate limit)"
+    if re.search(r"censor|nsfw|safety|moderat|blocked|not allowed|no usable picture|flagged|policy", w):
+        return "blocked by the provider's safety filter"
+    if re.search(r"timed out|timeout|took too long", w):
+        return "took too long (timed out)"
+    if re.search(r"no ai horde worker", w):
+        return "no free AI Horde worker is online"
+    if re.search(r"\b5\d\d\b|overload|unavailable|busy|bad gateway|internal", w):
+        return "the provider is busy or down"
+    if re.search(r"broken picture|no picture in answer|too small", w):
+        return "the provider sent no valid picture"
+    if "skipped" in w:
+        return "skipped (it failed repeatedly just before)"
+    return str(why)[:70]
+
+
+def reasons_for(pic):
+    """'Agnes: ...; Cloudflare: ...; Horde: ...' - the latest plain reason of each provider for one picture."""
+    last = {}
+    for e in LOG:
+        if e["pic"] == pic and not e["ok"]:
+            last[e["provider"]] = e["why"]
+    return "; ".join(f"{p.title()}: {plain(w)}" for p, w in last.items()) or "no reason was reported"
+
+
+def summary():
+    """One line per provider: how many pictures it made, how many attempts failed, and why (most common reason)."""
+    out = []
+    for p, _fn in PROVIDERS:
+        ok = sum(1 for e in LOG if e["provider"] == p and e["ok"])
+        bad = [plain(e["why"]) for e in LOG if e["provider"] == p and not e["ok"]]
+        if not ok and not bad:
+            continue
+        top = max(set(bad), key=bad.count) if bad else ""
+        out.append(f"{p.title()}: {ok} made, {len(bad)} failed" + (f" ({top})" if top else ""))
+    return out
+
 
 def _simple(prompt):
     """A shorter, plainer version of the prompt for the last try (long prompts are sometimes refused or time out)."""
@@ -169,14 +219,17 @@ def generate(prompt, aspect, dest_dir, name, exact=False, rounds=3):
             until = _BLOCKED.get(pname)
             if until and time.time() < until[0]:
                 notes.append(f"{pname}: skipped ({until[1]})")
+                LOG.append({"pic": name, "provider": pname, "ok": False, "why": until[1]})
                 continue
             try:
                 b = fn(text, aspect)
                 path = os.path.join(dest_dir, f"{name}.jpg")
                 _clean(b, path)                                 # must really be a picture; saved as a clean JPEG the renderer can always open
+                LOG.append({"pic": name, "provider": pname, "ok": True, "why": ""})
                 return path, pname
             except Exception as e:  # noqa: BLE001
                 why = str(e)[:140]
+                LOG.append({"pic": name, "provider": pname, "ok": False, "why": why})
                 notes.append(f"round {rnd + 1} {pname}: {why}")
                 if pname != "horde" and any(q in why.lower() for q in DEAD):
                     _BLOCKED[pname] = (time.time() + 20 * 60, why[:60])      # a dead key / empty credit: skip for 20 minutes, then look again
