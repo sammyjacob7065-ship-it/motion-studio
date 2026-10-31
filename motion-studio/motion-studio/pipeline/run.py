@@ -332,13 +332,29 @@ def main(job):
                 music_names = [n for n in registry if registry[n].get("kind") == "audio"]
             if voice_path:
                 voice_len = A.duration_of(voice_path)
-                try:
-                    words, _txt, _d = voice.words_for(voice_path)
-                    if vo.get("mode") == "generate" and pronounce.LAST["changed"]:
-                        words = pronounce.fix_words_to_text(words, vo.get("text", ""))      # captions keep the real spelling of names
-                except Exception as e:  # noqa: BLE001
-                    words = fallback_words(vo.get("text", ""), voice_len)
-                    notes.append("word timing guessed (speech check failed: " + str(e)[:60] + ")")
+                import time as _t
+                words, werr = [], ""
+                for _try in range(4):                      # the real word times are needed: captions, labels and pictures are all timed from them. No guessing.
+                    try:
+                        words, _txt, _d = voice.words_for(voice_path)
+                        need = len(str(vo.get("text", "")).split())
+                        if vo.get("mode") == "generate" and need and len(words) < need * 0.6:
+                            raise RuntimeError(f"only {len(words)} of about {need} words were heard")
+                        if not words:
+                            raise RuntimeError("no words were heard")
+                        break
+                    except Exception as e:  # noqa: BLE001
+                        werr, words = str(e)[:160], []
+                        print(f"::warning::reading the word times failed (try {_try + 1}): {werr}")
+                        _t.sleep(15 * (_try + 1))
+                if not words:
+                    if env("ALLOW_GUESSED_TIMING", "0") == "1":
+                        words = fallback_words(vo.get("text", ""), voice_len)
+                        notes.append("word timing guessed (speech check failed: " + werr[:60] + ")")
+                    else:
+                        raise RuntimeError("Could not read the real word times of the voice (" + werr + "). Nothing was guessed. Send /resume to try again; the voice is saved.")
+                elif vo.get("mode") == "generate" and pronounce.LAST["changed"]:
+                    words = pronounce.fix_words_to_text(words, vo.get("text", ""))      # captions keep the real spelling of names
             video_words = {}
             if plan.get("transcribe_videos") or plan.get("captions") or not voice_path:
                 for n, a in registry.items():
