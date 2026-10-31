@@ -320,7 +320,7 @@ def main(job):
             try:
                 want = float(plan.get("duration") or 0)
                 got = A.duration_of(voice_path)
-                if want >= 10 and got > want - 2.0:                    # the video must end when the brief says: speak a little faster
+                if want >= 10 and got > want - 2.0 and os.environ.get("VOICE_FIT", "").strip() == "1":                    # the video must end when the brief says: speak a little faster
                     fast = min(1.3, got / max(5.0, want - 2.0))
                     if fast > 1.03:
                         voice_path = voice.generate(vo["text"], os.path.join(work, "voice.mp3"), work, speed=round(fast, 2))
