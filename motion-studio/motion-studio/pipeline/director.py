@@ -22,8 +22,13 @@ def _read(p):
         return f.read()
 
 
+ANIM_ON = False                              # set by run.py when the script has ANIMATION / PART lines: the animation chapter is then added to the instructions
+
+
 def system_prompt(example=True):
     base = _read("system.md").replace("{{BLOCKS}}", _read("BLOCKS.md"))
+    if ANIM_ON:
+        base = base.replace("# Example", _read("ANIMATION.md") + "\n# Example", 1) if "# Example" in base else base + "\n" + _read("ANIMATION.md")
     if not example:                       # the short version used when the request must stay small
         return base.split("# Example")[0].rstrip() + "\n"
     ex = json.load(open(os.path.join(DIR, "examples", "fintech.json"), encoding="utf-8"))
@@ -110,6 +115,10 @@ def asset_table(registry):
             bits.append("shows: " + str(d.get("what", ""))[:120] + (" [logo]" if d.get("is_logo") else "") + (" [has text]" if d.get("has_text") else ""))
         for f in a.get("flags", []):
             bits.append("WARNING " + f)
+        if a.get("part"):
+            bits.append(f"PART '{a['part']}' (a separate cut-out piece for an animation)")
+        if a.get("animated"):
+            bits.append("this is the PRODUCT of an animated scene: " + str(a["animated"]))
         if a.get("origin"):
             bits.append(a["origin"])
         rows.append(f"- {name} | " + " | ".join(bits))
@@ -262,6 +271,8 @@ def _layer_line(l):
 _HEAD = re.compile(r"^\s*(?:#+\s*)?(?:scene|shot|picture|image)\s*\d{1,2}\b|^\s*\d{1,2}[.)]\s", re.I)
 _IMG = re.compile(r"^\s*(?:[-*\u2022]\s*)?(?:image[ _-]?prompt|picture[ _-]?prompt|image|picture|photo|visual|background[ _-]?image)\s*[:\-]\s*(.+)$", re.I)
 _VO = re.compile(r"^\s*(?:[-*\u2022]\s*)?(?:voice[- ]?over|voice|narration|narrator|vo|say|speech|line)\s*[:\-]\s*[\"\u201c]?(.+?)[\"\u201d]?\s*$", re.I)
+_ANIM = re.compile(r"^\s*(?:[-*\u2022]\s*)?(?:animation|magic)\s*[:\-]\s*(.+)$", re.I)
+_PART = re.compile(r"^\s*(?:[-*\u2022]\s*)?part\s+([A-Za-z0-9_ \-]{1,30}?)\s*[:=]\s*(.{8,})$", re.I)
 _OTHER = re.compile(r"^\s*(?:[-*\u2022]\s*)?(?:seconds?|time|camera|motion|action|animation|label|text|title|sound|sfx|music|caption|captions|transition|note|notes|effect|effects|graphic|graphics)\s*[:\-]", re.I)
 
 
@@ -269,7 +280,7 @@ def pictures_from_brief(text):
     """The script controls the pictures. Reads the image prompt the client wrote for each scene (IMAGE: / IMAGE PROMPT: / PICTURE: ...) and the voice line
     of the same scene (VOICE: / NARRATION: ...). The prompt is used exactly as written. Also understands '1. "spoken words": Picture of ...' lines."""
     lines = str(text or "").splitlines()
-    blocks, cur = [], None
+    blocks, cur, parts = [], None, []
     for ln in lines:
         if _HEAD.match(ln) and not _IMG.match(ln):
             cur = {"img": "", "vo": "", "head": ln}
@@ -283,11 +294,23 @@ def pictures_from_brief(text):
                     cur["img"] = "Photo of " + " ".join(d.group(1).split()).strip(" .")
             cur["_cap"] = None
             continue
+        mp = _PART.match(ln)
+        if mp and re.match(r"^(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|i|ii|iii|iv|v|vi|1st|2nd|3rd)$", mp.group(1).strip(), re.I):
+            mp = None                                          # "Part 1: ..." is a heading, not a separate piece
+        if mp:                                                 # PART <name>: <picture of one separate piece an animation needs>
+            parts.append({"name": " ".join(mp.group(1).split()), "prompt": " ".join(mp.group(2).split())[:600]})
+            if cur is not None:
+                cur["_cap"] = None
+            continue
         if cur is None:
             continue
         m = _IMG.match(ln)
         if m:
             cur["img"], cur["_cap"] = m.group(1).strip(), "img"
+            continue
+        m = _ANIM.match(ln)
+        if m:
+            cur["anim"], cur["_cap"] = m.group(1).strip(), "anim"
             continue
         m = _VO.match(ln)
         if m:
@@ -300,14 +323,24 @@ def pictures_from_brief(text):
             cur["img"] += " " + ln.strip()
         elif cur.get("_cap") == "vo":
             cur["vo"] += " " + ln.strip().strip("\"\u201c\u201d")
+        elif cur.get("_cap") == "anim":
+            cur["anim"] += " " + ln.strip()
     out = []
     for b in blocks:
         img = " ".join(b["img"].split())
         if len(img) < 8:
             continue
-        out.append({"id": f"pic{len(out) + 1}", "query": " ".join(re.sub(r"[^A-Za-z0-9 ]", " ", img).split()[:5]), "prompt": img[:900], "exact": True,
-                    "phrase": " ".join(b["vo"].split())[:200], "kind": "image", "why": "written in the brief"})
-    return out[:24]
+        req = {"id": f"pic{len(out) + 1}", "query": " ".join(re.sub(r"[^A-Za-z0-9 ]", " ", img).split()[:5]), "prompt": img[:900], "exact": True,
+               "phrase": " ".join(b["vo"].split())[:200], "kind": "image", "why": "written in the brief"}
+        if b.get("anim"):
+            req["anim"] = " ".join(b["anim"].split())[:600]    # this scene is animated: its picture is the PRODUCT (cut out), not a background
+        out.append(req)
+    out = out[:24]
+    for k, pt in enumerate(parts[:12]):
+        slug = re.sub(r"[^a-z0-9]+", "_", pt["name"].lower()).strip("_") or f"part{k + 1}"
+        out.append({"id": f"part_{slug}", "query": "part " + pt["name"], "prompt": pt["prompt"], "exact": True, "phrase": "", "kind": "image", "why": "written in the brief",
+                    "cutout": True, "part": pt["name"]})
+    return out
 
 
 def image_department(brief_text, plan, supplied_images, have_video=False, has_music=False, dur_hint=None):
