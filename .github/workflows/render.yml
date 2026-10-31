@@ -73,6 +73,14 @@ jobs:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+          GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          HORDE_API_KEY: ${{ secrets.HORDE_API_KEY }}
+          AGNES_API_KEY: ${{ secrets.AGNES_API_KEY }}
+          AGNES_API_KEY_2: ${{ secrets.AGNES_API_KEY_2 }}
+          AGNES_API_KEY_3: ${{ secrets.AGNES_API_KEY_3 }}
+          AGNES_API_KEY_4: ${{ secrets.AGNES_API_KEY_4 }}
           GEMINI_MODELS: ${{ secrets.GEMINI_MODELS }}
           TTS_URL: ${{ secrets.TTS_URL }}
           TTS_VOICE: ${{ secrets.TTS_VOICE }}
