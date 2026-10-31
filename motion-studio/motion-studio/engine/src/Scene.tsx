@@ -7,6 +7,8 @@ import { TextLayer, CounterLayer } from './blocks/Text';
 import { ShapeLayer, IconLayer, LineLayer, TransitionLayer } from './blocks/Graphics';
 import { ParticlesLayer } from './blocks/Particles';
 import { CaptionsLayer } from './blocks/Captions';
+import { MagicLayer } from './blocks/Magic';
+import { GroupLayer } from './blocks/Group';
 import type { Layer, Timeline } from './types';
 
 /** One broken layer must never kill the whole video: it is logged (so the cause can be found) and skipped. */
@@ -23,7 +25,7 @@ export const Scene: React.FC<{ timeline: Timeline }> = ({ timeline }) => {
   const palette = { ...DEFAULT_PALETTE, ...(timeline.palette || {}) };
   const ctx = useCtx(timeline.camera, palette);
   const layers = timeline.layers.map((l, i) => ({ l, i })).sort((a, b) => (a.l.z ?? 0) - (b.l.z ?? 0) || a.i - b.i);
-  const render = (layer: Layer) => {
+  const render = (layer: Layer): React.ReactNode => {
     switch (layer.type) {
       case 'image': return <ImageLayer layer={layer} ctx={ctx} />;
       case 'video': return <VideoLayer layer={layer} ctx={ctx} />;
@@ -35,6 +37,8 @@ export const Scene: React.FC<{ timeline: Timeline }> = ({ timeline }) => {
       case 'particles': return <ParticlesLayer layer={layer} ctx={ctx} />;
       case 'captions': return <CaptionsLayer layer={layer} ctx={ctx} />;
       case 'transition': return <TransitionLayer layer={layer} ctx={ctx} />;
+      case 'magic': return <MagicLayer layer={layer} ctx={ctx} />;
+      case 'group': return <GroupLayer layer={layer} ctx={ctx} renderChild={(c) => <LayerGuard id={String(c.id)} type={String(c.type)}>{render(c)}</LayerGuard>} />;
       default: return null;
     }
   };
