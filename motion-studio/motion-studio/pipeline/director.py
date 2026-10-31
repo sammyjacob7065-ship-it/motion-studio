@@ -59,8 +59,16 @@ def _chat(messages, temperature=0.4, max_tokens=6000, reasoning=None):
             import gemini
             system = next((m["content"] for m in messages if m.get("role") == "system"), None)
             user = "\n\n".join(str(m["content"]) for m in messages if m.get("role") != "system")
-            obj = gemini.parse_json(gemini.generate(user, system=system, temperature=temperature, max_tokens=max(int(max_tokens), 16000), rounds=2))
-            return json.dumps(obj)
+            ask, last = user, ""
+            for attempt in range(2):                           # a broken answer is asked for again once, with the error, before Groq is used
+                txt = gemini.generate(ask, system=system, temperature=temperature if attempt == 0 else 0.0, max_tokens=max(int(max_tokens), 16000), rounds=2)
+                try:
+                    return json.dumps(gemini.parse_json(txt))
+                except Exception as pe:  # noqa: BLE001
+                    last = str(pe)[:120]
+                    print(f"::warning::Gemini answer was not valid JSON (attempt {attempt + 1}): {last}")
+                    ask = user + f"\n\nIMPORTANT: your previous answer was NOT valid JSON ({last}). Answer again with the complete answer as STRICTLY valid JSON: double quotes, a comma between every two items, no comments, no trailing commas, nothing outside the JSON."
+            raise RuntimeError("Gemini JSON stayed invalid: " + last)
         except Exception as e:  # noqa: BLE001
             print("::warning::Gemini could not answer, using Groq:", str(e)[:140])
     return groq.chat(messages, temperature=temperature, max_tokens=max_tokens, reasoning=reasoning)
