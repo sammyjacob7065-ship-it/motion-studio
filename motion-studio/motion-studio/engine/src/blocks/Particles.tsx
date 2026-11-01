@@ -1,6 +1,6 @@
 import React from 'react';
 import { Ctx, LayerBox, hexA } from './common';
-import { rng } from '../anim';
+import { num, rng } from '../anim';
 import type { Layer } from '../types';
 
 export const ParticlesLayer: React.FC<{ layer: Layer; ctx: Ctx }> = ({ layer, ctx }) => {
@@ -10,7 +10,8 @@ export const ParticlesLayer: React.FC<{ layer: Layer; ctx: Ctx }> = ({ layer, ct
   const colors: string[] = p.colors && p.colors.length ? p.colors : [ctx.palette.accent || '#f5c451', ctx.palette.primary || '#3b82f6', '#ffffff'];
   const [smin, smax] = p.size || [3, 9];
   const seed = p.seed ?? 5;
-  const origin = p.origin || [ctx.W / 2, ctx.H / 2];
+  const baseOrigin = p.origin || [ctx.W / 2, ctx.H / 2];
+  const origin = [num(layer, 'originX', ctx.t, baseOrigin[0]), num(layer, 'originY', ctx.t, baseOrigin[1])];   // the emitter can move: anim.originX / anim.originY
   const area = p.area || [ctx.W, ctx.H];
   const life = p.life ?? (mode === 'burst' ? 1.6 : 6);
   const speed = p.speed ?? (mode === 'burst' ? 700 : 40);
@@ -37,6 +38,16 @@ export const ParticlesLayer: React.FC<{ layer: Layer; ctx: Ctx }> = ({ layer, ct
       o = (1 - u * u) * 1;
       const k = 1 - u * 0.6;
       sx = sy = k;
+    } else if (mode === 'emit') {                                  // a steady emitter: liquid droplets, steam, smoke, sparks, bubbles, dust
+      const age = ((t + r3 * life) % life);
+      const u2 = age / life;
+      const ang = ((dirDeg - spread / 2 + spread * r4) * Math.PI) / 180;
+      const v = speed * (0.4 + 0.6 * r5);
+      x = origin[0] + Math.cos(ang) * v * age;
+      y = origin[1] + Math.sin(ang) * v * age + 0.5 * g * age * age;
+      o = Math.pow(1 - u2, p.fadePower ?? 1.2) * Math.min(1, age * 12);
+      const k2 = 1 - u2 * (p.shrink ?? 0.5) + (p.grow ?? 0) * u2;
+      sx = sy = Math.max(0.05, k2);
     } else if (mode === 'sparkle') {
       x = origin[0] - area[0] / 2 + area[0] * r3;
       y = origin[1] - area[1] / 2 + area[1] * r4;
