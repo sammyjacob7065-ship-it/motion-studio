@@ -335,7 +335,7 @@ def pictures_from_brief(text):
         img = " ".join(b["img"].split())
         use = " ".join(str(b.get("use", "")).split())
         if len(img) < 8 and use and use.lower() not in ("ai", "none", "generate", "no") and not use.lower().startswith("http"):
-            img = "Photo of " + use                           # a scene that only says which brand picture to use
+            img = "Photo of " + re.sub(r"^(?:search|web|find|wikimedia|commons|openverse)\b\s*[:\-]?\s*", "", use, flags=re.I)                           # a scene that only says which brand picture to use
         if len(img) < 8 and use.lower().startswith("http"):
             img = "The brand picture given by the writer"
         if len(img) < 8:
@@ -350,8 +350,12 @@ def pictures_from_brief(text):
     out = out[:24]
     for k, pt in enumerate(parts[:12]):
         slug = re.sub(r"[^a-z0-9]+", "_", pt["name"].lower()).strip("_") or f"part{k + 1}"
-        out.append({"id": f"part_{slug}", "query": "part " + pt["name"], "prompt": pt["prompt"], "exact": True, "phrase": "", "kind": "image", "why": "written in the brief",
-                    "cutout": True, "part": pt["name"]})
+        rq = {"id": f"part_{slug}", "query": "part " + pt["name"], "prompt": pt["prompt"], "exact": True, "phrase": "", "kind": "image", "why": "written in the brief",
+              "cutout": True, "part": pt["name"]}
+        mw = re.match(r"^(?:search|web|find|wikimedia|commons|openverse)\b\s*[:\-]?\s*(.+)$", pt["prompt"], re.I)
+        if mw:                                                 # PART bottle: search coca cola glass bottle  -> a real free photo, cut out
+            rq["use"], rq["prompt"], rq["query"] = pt["prompt"], "Photo of " + mw.group(1), mw.group(1)[:40]
+        out.append(rq)
     return out
 
 
