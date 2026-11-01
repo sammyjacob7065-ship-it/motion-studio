@@ -13,6 +13,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import assets as A  # noqa: E402
 import beats  # noqa: E402
+import brandsite  # noqa: E402
 import checker  # noqa: E402
 import director  # noqa: E402
 import groq  # noqa: E402
@@ -106,6 +107,9 @@ def main(job):
     except Exception as e:  # noqa: BLE001
         print("script file not read:", e)
     director.ANIM_ON = any(director._ANIM.match(ln) or (director._PART.match(ln) and not re.match(r"^(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|i|ii|iii|iv|v|vi|1st|2nd|3rd)$", director._PART.match(ln).group(1).strip(), re.I)) for ln in str(brief.get("prompt", "")).splitlines())
+    brand_sites, _bp = brandsite.sites_in(str(brief.get("prompt", "")))        # a line "BRAND SITE: https://...": the studio takes the brand's own pictures from that site
+    if brand_sites:
+        brief["prompt"] = _bp
     wm_text = str(brief.get("watermark") or env("WATERMARK") or "")
     _m = re.search(r"^[ \t]*WATERMARK[ \t]*:[ \t]*(.+?)[ \t]*$", str(brief.get("prompt", "")), re.I | re.M)
     if _m:                                                         # a line "WATERMARK: name" in the script: used as the brand mark, and not shown as a text
@@ -212,12 +216,46 @@ def main(job):
                 skipped = 0
                 lost = []
                 spoken = str((plan.get("voiceover") or {}).get("text", "")) or str(brief.get("prompt", ""))
+                brand_kept, brand_hit, brand_used = [], {}, []
+                if brand_sites:
+                    try:
+                        mon.note("stock", "reading the brand site: " + ", ".join(brand_sites)[:120])
+                        brand_kept, bnote = brandsite.get(brand_sites, adir)
+                        reqs = [r for r in plan["stock"][:40] if str(r.get("kind", "image")) != "video"]
+                        brand_hit = brandsite.match(brand_kept, reqs) if brand_kept else {}
+                        tg.send(f"🌐 Brand site: {bnote}. Real pictures used for {len(brand_hit)} of {len(reqs)} scenes; the others are made by AI." if brand_kept else
+                                f"🌐 Brand site: no usable pictures found ({bnote}). All pictures are made by AI as usual. (Some sites block downloads; you can also send the product photos here.)")
+                        if brand_kept and re.search(r"\blogo\b", str(brief.get("prompt", "")), re.I) and not any(re.search(r"logo", n, re.I) or (a.get("describe") or {}).get("is_logo") for n, a in registry.items()):
+                            lg = next((k for k in brand_kept if k["logo"]), None)
+                            if lg:                                     # the script talks about the logo and none was sent: the site's own logo
+                                import shutil
+                                lp = os.path.join(adir, "brand_logo" + os.path.splitext(lg["path"])[1])
+                                shutil.copy(lg["path"], lp)
+                                lfinal, linfo, lflags = A.analyze(lp, work)
+                                linfo["flags"], linfo["origin"] = lflags, "the brand's own logo from its site"
+                                linfo["describe"] = {"what": "the brand logo", "is_logo": True}
+                                registry[os.path.basename(lfinal)], paths[os.path.basename(lfinal)] = linfo, lfinal
+                    except Exception as e:  # noqa: BLE001
+                        print("::warning::brand site skipped:", str(e)[:200])
+                        brand_kept, brand_hit = [], {}
                 for req in plan["stock"][:40]:
                     if any(w in str(req.get("query", "")).lower() for w in ("music", "song", "audio", "sound effect", "soundtrack")):
                         skipped += 1                               # not a picture request: it must not count as a failed picture
                         continue
                     p, how = None, "stock picture"
-                    if str(req.get("kind", "image")) != "video":
+                    rid_ = re.sub(r"[^A-Za-z0-9_-]", "", str(req.get("id", "pic"))) or "pic"
+                    if str(req.get("kind", "image")) != "video" and str(req.get("use", "")).lower().startswith("http"):
+                        p = brandsite.fetch_direct(str(req["use"]).split()[0], adir, rid_ + "_brand")      # the writer gave the picture link
+                        if p:
+                            how = "brand site picture"
+                    if not p and str(req.get("kind", "image")) != "video" and str(req.get("id")) in brand_hit:
+                        import shutil
+                        src_ = brand_kept[brand_hit[str(req["id"])]]["path"]
+                        p = os.path.join(adir, rid_ + "_brand" + os.path.splitext(src_)[1])
+                        shutil.copy(src_, p)
+                        how = "brand site picture"
+                        brand_used.append(str(req.get("query", ""))[:30])
+                    if not p and str(req.get("kind", "image")) != "video":
                         said = str(req.get("phrase") or "")
                         ai_prompt = str(req.get("prompt") or "").strip() or (str(req.get("query", "")) + (", " + said if said else ""))
                         if req.get("anim") or req.get("cutout"):      # an animated product or a separate part: one object on a plain white background, so it can be cut out
