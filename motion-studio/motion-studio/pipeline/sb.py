@@ -54,6 +54,17 @@ class Store:
                 raise RuntimeError(f"{r.status_code} {r.text[:120]}")
         retry(go, what=f"upload {path}")
 
+    def list_files(self, prefix):
+        """Files directly under a folder: [{name, created_at}] oldest first. Empty list on any problem."""
+        try:
+            r = S.post(f"{self.url}/storage/v1/object/list/{self.bucket}", headers={**self.h, "Content-Type": "application/json"},
+                       data=json.dumps({"prefix": prefix.strip("/"), "limit": 200, "sortBy": {"column": "created_at", "order": "asc"}}), timeout=30)
+            if r.status_code != 200:
+                return []
+            return [{"name": x["name"], "created_at": x.get("created_at") or ""} for x in r.json() if x.get("name") and x.get("id") is not None]
+        except Exception:  # noqa: BLE001
+            return []
+
     def signed_url(self, path, days=7):
         r = S.post(f"{self.url}/storage/v1/object/sign/{self.bucket}/{quote(path)}", headers={**self.h, "Content-Type": "application/json"}, data=json.dumps({"expiresIn": days * 86400}), timeout=30)
         if r.status_code != 200:
