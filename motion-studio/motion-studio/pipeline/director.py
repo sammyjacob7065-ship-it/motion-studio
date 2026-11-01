@@ -272,6 +272,7 @@ _HEAD = re.compile(r"^\s*(?:#+\s*)?(?:scene|shot|picture|image)\s*\d{1,2}\b|^\s*
 _IMG = re.compile(r"^\s*(?:[-*\u2022]\s*)?(?:image[ _-]?prompt|picture[ _-]?prompt|image|picture|photo|visual|background[ _-]?image)\s*[:\-]\s*(.+)$", re.I)
 _VO = re.compile(r"^\s*(?:[-*\u2022]\s*)?(?:voice[- ]?over|voice|narration|narrator|vo|say|speech|line)\s*[:\-]\s*[\"\u201c]?(.+?)[\"\u201d]?\s*$", re.I)
 _ANIM = re.compile(r"^\s*(?:[-*\u2022]\s*)?(?:animation|magic)\s*[:\-]\s*(.+)$", re.I)
+_USE = re.compile(r"^\s*(?:[-*\u2022]\s*)?(?:use[ _-]?(?:picture|image|photo)|site[ _-]?(?:picture|image|photo)|brand[ _-]?(?:picture|image|photo))\s*[:\-]\s*(.+)$", re.I)
 _PART = re.compile(r"^\s*(?:[-*\u2022]\s*)?part\s+([A-Za-z0-9_ \-]{1,30}?)\s*[:=]\s*(.{8,})$", re.I)
 _OTHER = re.compile(r"^\s*(?:[-*\u2022]\s*)?(?:seconds?|time|camera|motion|action|animation|label|text|title|sound|sfx|music|caption|captions|transition|note|notes|effect|effects|graphic|graphics)\s*[:\-]", re.I)
 
@@ -304,6 +305,10 @@ def pictures_from_brief(text):
             continue
         if cur is None:
             continue
+        m = _USE.match(ln)
+        if m:                                                  # USE PICTURE: <what to take from the brand site | a picture link | AI>
+            cur["use"], cur["_cap"] = m.group(1).strip().strip("\"\u201c\u201d"), None
+            continue
         m = _IMG.match(ln)
         if m:
             cur["img"], cur["_cap"] = m.group(1).strip(), "img"
@@ -328,10 +333,17 @@ def pictures_from_brief(text):
     out = []
     for b in blocks:
         img = " ".join(b["img"].split())
+        use = " ".join(str(b.get("use", "")).split())
+        if len(img) < 8 and use and use.lower() not in ("ai", "none", "generate", "no") and not use.lower().startswith("http"):
+            img = "Photo of " + use                           # a scene that only says which brand picture to use
+        if len(img) < 8 and use.lower().startswith("http"):
+            img = "The brand picture given by the writer"
         if len(img) < 8:
             continue
         req = {"id": f"pic{len(out) + 1}", "query": " ".join(re.sub(r"[^A-Za-z0-9 ]", " ", img).split()[:5]), "prompt": img[:900], "exact": True,
                "phrase": " ".join(b["vo"].split())[:200], "kind": "image", "why": "written in the brief"}
+        if use:
+            req["use"] = use[:300]
         if b.get("anim"):
             req["anim"] = " ".join(b["anim"].split())[:600]    # this scene is animated: its picture is the PRODUCT (cut out), not a background
         out.append(req)
