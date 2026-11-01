@@ -354,7 +354,7 @@ def match(cands, reqs):
     product / logo / place / people. Generic scenes (a man at a desk, a city street) get nothing and keep their AI picture."""
     if not cands or not reqs:
         return {}
-    todo = [r for r in reqs if str(r.get("use", "")).strip().lower() not in ("ai", "none", "generate", "no", "ai picture")]
+    todo = [r for r in reqs if str(r.get("use", "")).strip().lower() not in ("ai", "none", "generate", "no", "ai picture") and not re.match(r"^(?:search|web|find|wikimedia|commons|openverse)\b", str(r.get("use", "")).strip(), re.I)]
     if not todo:
         return {}
     cl = cands[:24]
