@@ -17,8 +17,8 @@ ICONS = {"shield", "check", "lock", "card", "bolt", "globe", "phone", "coin", "a
          "chart", "heart", "mail", "clock", "home", "bell", "cart"}
 FONTS = {"Inter", "Poppins", "Montserrat", "Space Grotesk", "Playfair Display", "Bebas Neue", "Oswald", "DM Sans", "Outfit", "Sora", "Anton"}
 SIZES = {"9:16": (1080, 1920), "16:9": (1920, 1080), "1:1": (1080, 1080), "4:5": (1080, 1350)}
-MAGIC_KINDS = {"box_open", "table_rise", "drop", "roll_in", "cap_pop", "spin_float", "fly_in", "burst", "fizz", "splash", "steam"}
-MAGIC_NO_ASSET = {"burst", "fizz", "splash", "steam"}
+MAGIC_KINDS = {"box_open", "table_rise", "drop", "roll_in", "cap_pop", "spin_float", "fly_in", "burst", "fizz", "splash", "steam", "pour"}
+MAGIC_NO_ASSET = {"burst", "fizz", "splash", "steam", "pour"}
 NARROW_FONTS = {"bebasneue", "anton", "oswald"}
 
 
@@ -259,6 +259,14 @@ def normalize(tl, assets, voice_len=None, tail=1.2):
                     if ia and assets[ia].get("kind") == "image":
                         its.append(ia)
                 props["items"] = its[:8]
+            if kind == "pour":                                       # the can is optional: without it the drink streams in from the top of the screen
+                a = find_asset(props.get("asset"))
+                if a and assets[a].get("kind") == "image":
+                    props["asset"] = a
+                    aw, ah = _num(assets[a].get("width"), 0), _num(assets[a].get("height"), 0)
+                    props["aspect"] = round(ah / aw, 4) if aw and ah else 1.0
+                else:
+                    props.pop("asset", None)
             props["speed"] = min(3.0, max(0.4, _num(props.get("speed"), 1.0)))
         elif typ == "group":
             kids = [c for c in (props.get("children") or []) if isinstance(c, dict)][:40]
