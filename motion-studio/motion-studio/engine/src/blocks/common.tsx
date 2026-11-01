@@ -35,6 +35,36 @@ export const useCtx = (camera: CameraKey[] | undefined, palette: Record<string, 
   return { t: frame / fps, frame, fps, W: width, H: height, camera, palette };
 };
 
+/**
+ * PHYSICS: props.physics = {from:[x,y], vx, vy, gravity (px/s2, default 2600), floor (y where it lands), bounce (0-1, default .4), spin (deg/s while flying), radius (px, rolls when it lands), friction}.
+ * The object flies, falls, bounces on the floor and rolls to a stop. Times are counted from the layer's start. Same result in every render.
+ */
+const physicsAt = (layer: Layer, t: number) => {
+  const p: any = layer.props!.physics;
+  const from = Array.isArray(p.from) ? p.from : [layer.x ?? 0, layer.y ?? 0];
+  const g = p.gravity ?? 2600, bounce = p.bounce ?? 0.4, floor = p.floor ?? 1e9, radius = p.radius ?? 0, fr = p.friction ?? 0.35;
+  let spin = p.spin ?? 0, x = from[0], y = from[1], vx = p.vx ?? 0, vy = p.vy ?? 0, rot = p.rot0 ?? 0, rolling = false;
+  const total = Math.max(0, t - layer.start);
+  const dt = 1 / 60;
+  let tt = 0, n = 0;
+  while (tt < total && n++ < 900) {
+    const st = Math.min(dt, total - tt);
+    if (!rolling) {
+      vy += g * st; x += vx * st; y += vy * st; rot += spin * st;
+      if (y >= floor && vy > 0) {
+        y = floor;
+        if (Math.abs(vy) < 260) { rolling = true; vy = 0; }
+        else { vy = -vy * bounce; vx *= 0.8; spin *= 0.6; }
+      }
+    } else {
+      vx *= Math.pow(fr, st); x += vx * st;
+      if (radius > 0) rot += (vx / radius) * (180 / Math.PI) * st; else rot += spin * st * 0.2;
+    }
+    tt += st;
+  }
+  return { x, y, rot };
+};
+
 /** Positions a layer, applies camera, enter/exit effects, pulse and animated x/y/scale/rotate/opacity. */
 export const LayerBox: React.FC<{ layer: Layer; ctx: Ctx; full?: boolean; three?: boolean; children: (fx: ReturnType<typeof layerFx>) => React.ReactNode }> = ({ layer, ctx, full, three, children }) => {
   const { t } = ctx;
@@ -43,15 +73,16 @@ export const LayerBox: React.FC<{ layer: Layer; ctx: Ctx; full?: boolean; three?
   const par = layer.parallax ?? 1;
   const cam = cameraAt(ctx.camera, t);
   const camT = `translate(${-cam.x * par}px, ${-cam.y * par}px) scale(${1 + (cam.scale - 1) * par}) rotate(${cam.rotate * par}deg)`;
+  const ph = layer.props && layer.props.physics ? physicsAt(layer, t) : null;   // a thrown / dropped / bouncing / rolling object: the studio simulates it
   const wg = layer.props && layer.props.wiggle;                                  // {pos, rot, freq}: a living shake (hand-held look, shivering, vibration)
   const wob = (k: number) => (wg ? Math.sin(t * (wg.freq ?? 3) * 6.2832 + k * 1.7) * 0.6 + Math.sin(t * (wg.freq ?? 3) * 9.7 + k * 4.1) * 0.4 : 0);
-  const x = num(layer, 'x', t, layer.x ?? ctx.W / 2) + (wg ? wob(1) * (wg.pos ?? 0) : 0);
-  const y = num(layer, 'y', t, layer.y ?? ctx.H / 2) + (wg ? wob(2) * (wg.pos ?? 0) : 0);
+  const x = (ph ? ph.x : num(layer, 'x', t, layer.x ?? ctx.W / 2)) + (wg ? wob(1) * (wg.pos ?? 0) : 0);
+  const y = (ph ? ph.y : num(layer, 'y', t, layer.y ?? ctx.H / 2)) + (wg ? wob(2) * (wg.pos ?? 0) : 0);
   const sc = num(layer, 'scale', t, 1);
   const sX = num(layer, 'scaleX', t, 1), sY = num(layer, 'scaleY', t, 1);
   const rX = num(layer, 'rotateX', t, 0), rY = num(layer, 'rotateY', t, 0), skX = num(layer, 'skewX', t, 0);
   const org = layer.props && Array.isArray(layer.props.origin) ? `${layer.props.origin[0]}% ${layer.props.origin[1]}%` : undefined;   // the pivot (hinge) of rotations and scaling
-  const rot = num(layer, 'rotate', t, 0) + (wg ? wob(3) * (wg.rot ?? 0) : 0);
+  const rot = num(layer, 'rotate', t, 0) + (ph ? ph.rot : 0) + (wg ? wob(3) * (wg.rot ?? 0) : 0);
   const op = num(layer, 'opacity', t, 1) * fx.opacity;
   const pul = layer.props && layer.props.pulse;
   const pulse = pul ? 1 + (pul.amount ?? 0.05) * Math.sin(((t - layer.start) / (pul.period ?? 1.6)) * Math.PI * 2) : 1;
