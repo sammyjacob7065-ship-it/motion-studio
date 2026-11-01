@@ -58,6 +58,115 @@ def fallback_words(text, dur):
     return [{"w": w, "s": round(i * step, 3), "e": round((i + 1) * step - 0.02, 3)} for i, w in enumerate(ws)]
 
 
+_REPLACE = re.compile(r"^\s*replace\s+(?:the\s+)?(?:picture\s+of\s+(?:the\s+)?|image\s+of\s+(?:the\s+)?)?(.+?)\s+with\s+(?:my|the|this|that)\s+(?:new\s+|real\s+)?(?:photo|picture|image|file)\b.*$", re.I | re.S)
+
+
+def _swap_assets(obj, mapping):
+    """Exact file names are swapped everywhere in a timeline (image layers, magic pieces, group children). Nothing else is touched."""
+    if isinstance(obj, dict):
+        return {k: _swap_assets(v, mapping) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_swap_assets(v, mapping) for v in obj]
+    if isinstance(obj, str) and obj in mapping:
+        return mapping[obj]
+    return obj
+
+
+def _find_old_pictures(registry, words, timeline):
+    """Which pictures of the finished video does 'the can' / 'the logo' mean? Only pictures really used in the timeline count."""
+    w = [x for x in re.sub(r"[^a-z0-9 ]", " ", str(words).lower()).split() if x not in ("the", "real", "brand", "predator", "old", "ai", "generated")] or re.sub(r"[^a-z0-9 ]", " ", str(words).lower()).split()
+    used = json.dumps(timeline)
+    best, hits = 0, []
+    for name, info in registry.items():
+        if info.get("kind") != "image" or ('"' + name + '"') not in used:
+            continue
+        part, q, stem = str(info.get("part", "")).lower(), str(info.get("query", "")).lower(), name.lower()
+        sc = 0
+        if part and any(x in part.split() for x in w):
+            sc = 10
+        elif any(x == "logo" for x in w) and ((info.get("describe") or {}).get("is_logo") or "logo" in stem):
+            sc = 9
+        elif any(stem.startswith("part_" + x) for x in w):
+            sc = 9
+        elif any(x in q.split() for x in w) and (info.get("animated") or info.get("alpha")):
+            sc = 6
+        elif any(x in stem for x in w if len(x) > 2):
+            sc = 2
+        if sc and sc >= best:
+            if sc > best:
+                best, hits = sc, []
+            hits.append(name)
+    return hits
+
+
+def _replace_pictures(store, brief, src, notes, registry, paths, adir, work, timeline, tg):
+    """EDIT: 'REPLACE CAN WITH MY PHOTO'. The photo the client sent after /edit is cut out and put where the old picture was. Nothing else changes.
+    Returns (new timeline, what was done, problems)."""
+    import shutil
+    done, problems = [], []
+    mapping = {}
+    chat = brief.get("chat_id")
+    files = []
+    try:
+        cur = store.get_json(f"motion/{chat}/current.json") or {}
+        if cur.get("job"):
+            files = store.list_files(f"motion/jobs/{cur['job']}/assets")
+            cj = cur["job"]
+    except Exception:  # noqa: BLE001
+        files = []
+    files = [f for f in files if A.kind_of(f["name"]) == "image"]
+    files.sort(key=lambda f: (f.get("created_at") or "", f["name"]))
+    if not files:
+        return timeline, done, ["no photo was found: send /edit, then send the photo as a File (not Photo), then send your note and /apply"]
+    for i, note in enumerate(notes):
+        words = _REPLACE.match(str(note).strip()).group(1).strip()
+        if i >= len(files):
+            problems.append(f"'{words}': there is no second photo for it (send one photo per replace note)")
+            continue
+        olds = _find_old_pictures(registry, words, timeline)
+        if not olds:
+            problems.append(f"'{words}': I could not find that picture in the video")
+            continue
+        f = files[i]
+        dest = os.path.join(adir, "edit_" + re.sub(r"[^A-Za-z0-9._-]", "_", f["name"]))
+        store.download(f"motion/jobs/{cj}/assets/{f['name']}", dest)
+        final, info, flags = A.analyze(dest, work)
+        if info.get("kind") != "image":
+            problems.append(f"'{words}': the file {f['name']} is not a picture")
+            continue
+        old0 = registry[olds[0]]
+        needs_cut = bool(old0.get("part") or old0.get("animated") or old0.get("alpha")) and not info.get("alpha")
+        if needs_cut:
+            cp = A.cutout(final)
+            if not cp:
+                problems.append(f"'{words}': I could not remove the background of your photo. Send the {words} on a plain white background, or as a transparent PNG, and try again")
+                continue
+            final = cp
+            final, info, flags = A.analyze(final, work)
+        nm = f"real{i + 1}_" + os.path.splitext(olds[0])[0] + os.path.splitext(final)[1]
+        newp = os.path.join(adir, nm)
+        shutil.copy(final, newp)
+        final, info, flags = A.analyze(newp, work)
+        nm = os.path.basename(final)
+        info["flags"], info["origin"] = flags, "the client's own real photo (replaces the AI picture)"
+        for k in ("part", "animated", "query", "phrase"):
+            if old0.get(k):
+                info[k] = old0[k]
+        registry[nm], paths[nm] = info, final
+        for o in olds:
+            mapping[o] = nm
+        done.append(f"replaced {', '.join(olds)} with your photo {f['name']}")
+        try:
+            if _ck_file(store, src, nm, final):
+                old = _ck(store, src, "pictures") or {"entries": {}}
+                old.setdefault("entries", {})[nm] = json.loads(json.dumps(info, default=str))
+                _ck_save(store, src, "pictures", old)
+        except Exception as e:  # noqa: BLE001
+            print("replace checkpoint skipped:", e)
+    return (_swap_assets(timeline, mapping) if mapping else timeline), done, problems
+
+
+
 def _ck(store, job, name):
     """A saved step of this job (None when it does not exist yet). Used by /resume so a failed job continues where it stopped."""
     try:
@@ -547,7 +656,22 @@ def main(job):
             prev = store.get_json(f"motion/jobs/{brief.get('edit_of')}/timeline.json") or {}
             if not prev.get("timeline"):
                 raise RuntimeError("The video you want to edit was not found (its timeline is not saved). Send your prompt again to make it fresh.")
-            new_tl, raw_audio, newpics, dnotes = director.edit(prev["timeline"], prev.get("audio") or [], edit_notes, registry, plan, brief["prompt"], size, mix.SFX_NAMES)
+            prev_tl = prev["timeline"]
+            rep_notes = [n for n in edit_notes if _REPLACE.match(str(n).strip())]
+            other_notes = [n for n in edit_notes if n not in rep_notes]
+            rep_done = []
+            if rep_notes:
+                prev_tl, rep_done, rep_problems = _replace_pictures(store, brief, src, rep_notes, registry, paths, adir, work, prev_tl, tg)
+                if rep_problems:
+                    tg.send("⚠️ Picture replace:\n" + "\n".join("- " + p for p in rep_problems)[:1500])
+                if rep_problems and not rep_done and not other_notes:
+                    raise RuntimeError("Nothing was replaced. " + rep_problems[0])
+            if other_notes:
+                new_tl, raw_audio, newpics, dnotes = director.edit(prev_tl, prev.get("audio") or [], other_notes, registry, plan, brief["prompt"], size, mix.SFX_NAMES)
+                if rep_done:
+                    dnotes = "; ".join(rep_done) + ". " + str(dnotes)
+            else:
+                new_tl, raw_audio, newpics, dnotes = prev_tl, prev.get("audio") or [], [], "; ".join(rep_done) + ". Nothing else was changed."
             made = {}
             for npc in newpics:
                 stem = os.path.splitext(str(npc["asset"]))[0]
