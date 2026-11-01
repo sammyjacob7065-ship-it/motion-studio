@@ -18,6 +18,7 @@ import checker  # noqa: E402
 import director  # noqa: E402
 import groq  # noqa: E402
 import imagegen  # noqa: E402
+import openimages  # noqa: E402
 import mix  # noqa: E402
 import pronounce  # noqa: E402
 import render  # noqa: E402
@@ -216,7 +217,7 @@ def main(job):
                 skipped = 0
                 lost = []
                 spoken = str((plan.get("voiceover") or {}).get("text", "")) or str(brief.get("prompt", ""))
-                brand_kept, brand_hit, brand_used = [], {}, []
+                brand_kept, brand_hit, brand_used, open_credits = [], {}, [], []
                 if brand_sites:
                     try:
                         mon.note("stock", "reading the brand site: " + ", ".join(brand_sites)[:120])
@@ -255,6 +256,27 @@ def main(job):
                         shutil.copy(src_, p)
                         how = "brand site picture"
                         brand_used.append(str(req.get("query", ""))[:30])
+                    cut_need = bool(req.get("anim") or req.get("cutout"))
+                    cut_done = False
+                    use_ = str(req.get("use", "")).strip().lower()
+                    open_words = openimages.search_words(req.get("use")) if req.get("use") else None
+                    auto_open = bool(cut_need and (req.get("part") or req.get("anim")) and use_ not in ("ai", "none", "generate", "no", "ai picture") and env("OPEN_IMAGES", "") == "auto")      # automatic search only when switched on: it could pick another brand's product; the script asks with USE PICTURE: search ...
+                    if not p and str(req.get("kind", "image")) != "video" and (open_words is not None or auto_open):
+                        try:                                           # a real, free-to-use photo from Wikimedia Commons / Openverse
+                            op, ocr = openimages.find(req, adir, rid_ + "_open", words=open_words or None, cutout_needed=cut_need)
+                            if op and cut_need:
+                                cp_ = A.cutout(op)
+                                if cp_:
+                                    op, cut_done = cp_, True
+                                else:
+                                    op, ocr = None, "its background could not be cut out"
+                            if op:
+                                p, how = op, "open picture"
+                                open_credits.append(f"{str(req.get('query', ''))[:30]}: {ocr}")
+                            else:
+                                print("::notice::open pictures: ", str(ocr)[:160])
+                        except Exception as e:  # noqa: BLE001
+                            print("::warning::open pictures skipped:", str(e)[:160])
                     if not p and str(req.get("kind", "image")) != "video":
                         said = str(req.get("phrase") or "")
                         ai_prompt = str(req.get("prompt") or "").strip() or (str(req.get("query", "")) + (", " + said if said else ""))
@@ -273,7 +295,7 @@ def main(job):
                             pic_report.append(f"{req.get('query')}: NO PICTURE")
                             retry.append((req, str(req.get("prompt") or "").strip() or str(req.get("query", ""))))
                             continue
-                    if req.get("anim") or req.get("cutout"):
+                    if (req.get("anim") or req.get("cutout")) and not cut_done:
                         try:
                             cp = A.cutout(p)
                             if cp:
@@ -292,6 +314,8 @@ def main(job):
                     info["phrase"] = str(req.get("phrase") or "") or checker.phrase_for(req.get("query", ""), spoken)
                     registry[name], paths[name] = info, final
                     got += 1
+                if open_credits:
+                    tg.send("📷 Real free-to-use photos were used (credit them if you publish):\n" + "\n".join("- " + c for c in open_credits)[:1500])
                 if retry:                                          # a picture must never be missing: second chance with softer, simpler wording after a short rest
                     import time
                     time.sleep(30)
