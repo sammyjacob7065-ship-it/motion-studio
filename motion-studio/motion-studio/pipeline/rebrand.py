@@ -134,7 +134,7 @@ CHAT_SYSTEM = ("You are the creative director of an international motion-graphic
                "1) If you do not yet know what he wants: ask him A) SWAP ONLY (he tells you what to change, everything else stays) or B) REBRAND (he gives a short brand summary: what he sells, who buys it, mood, slogan, colours, country and language). Ask only what is missing, never the same thing twice. "
                "2) When you know enough, write the COPY PLAN as a short numbered list. Every brand-specific text, voice line, picture and colour of the model gets one line: 'scene 2 headline: OLD -> NEW'. Keep it compact. "
                "3) Ask him to approve or to change items by number. Accept changes ('change 3 to ...') and update the plan. "
-               "4) When he approves or sends /make, set ready true and write the brief. "
+               "4) Write the brief IN THE SAME REPLY as the plan, as soon as the plan is complete (set ready true), and rewrite it after every change he asks, so that when he sends /make the studio can build at once. In your reply end with: approve, change items by number, or send /make. "
                "HOW TO WRITE THE NEW WORDS (this is your craft, be an award-winning copywriter): "
                "understand the JOB of each original line (hook, benefit, proof, offer, call to action, slogan) and write a NEW line that does the same job for HIS brand and product. "
                "Match the length and rhythm of the original (same number of words, within one or two) so it fits the same animation and timing. "
@@ -154,7 +154,7 @@ CHAT_SCHEMA = ('{"reply":"what you say to the client (max 3000 characters)","agr
                '"swaps":[{"old":"","new":""}],"copy_plan":[{"n":1,"scene":1,"role":"headline","old":"","new":"","why":""}],"colors":{"from":["#hex"],"to":["#hex"]},'
                '"changes":["each change the client asked for"],"keep":["what must stay the same"],"voice_over":"the new voice-over in full, or empty","extra":"anything else that matters"},'
                '"needs":{"items":["specific things to send"]},"plan_shown":true,"ready":true,'
-               '"brief":"ONLY when ready (the plan is approved or the client sent /make) and brand and product are known: the complete studio prompt described above. Otherwise empty."}')
+               '"brief":"as soon as the plan is complete (brand or swaps known): the complete studio prompt described above, updated after every change. Empty only while you still need information."}')
 
 
 def _agreed(rf):
@@ -171,7 +171,7 @@ def _ask_ai(prompt, system, temperature=0.5):
     err = ""
     if gemini.available():
         try:
-            return gemini.parse_json(gemini.generate(prompt, system=system, temperature=temperature, rounds=2)), err
+            return gemini.parse_json(gemini.generate(prompt, system=system, temperature=temperature, rounds=1, max_tokens=9000, timeout=70, deadline=170)), err
         except Exception as e:  # noqa: BLE001
             err = "Gemini: " + str(e)[:100]
             print("::warning::rebrand chat by Gemini failed:", err)
@@ -202,8 +202,8 @@ def chat_turn(rf, user_text):
     needs = ans.get("needs") if isinstance(ans.get("needs"), dict) else {}
     if needs:
         merged["needs"] = needs
-    ready = bool(ans.get("ready")) and merged["mode"] != "unknown" and (merged.get("product") or merged.get("brand_to") or merged.get("swaps"))
-    brief = str(ans.get("brief") or "").strip() if ready else ""
+    known = merged["mode"] != "unknown" and bool(merged.get("product") or merged.get("brand_to") or merged.get("swaps") or merged.get("copy_plan"))
+    brief = str(ans.get("brief") or "").strip() if (known and (ans.get("ready") or ans.get("brief"))) else ""
     reply = str(ans["reply"]).strip()[:3800]
     if brief:
         brief, note = _guard(spec, merged, brief)
