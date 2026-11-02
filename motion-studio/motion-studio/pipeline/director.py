@@ -250,14 +250,14 @@ def timeline(prompt, plan_json, registry, words, voice_start, size, sfx_names, m
         f"SOUND EFFECTS AVAILABLE: {', '.join(sfx_names)}\n{extra}"
     )
     if est_tokens(system_prompt(), user) > _limit():
-        return _timeline_in_parts(user, prompt, plan_json, registry, words, voice_start, size, sfx_names, dur), user
+        return _timeline_in_parts(user, prompt, plan_json, registry, words, voice_start, size, sfx_names, dur, extra=extra), user
     try:
         ans = _chat([{"role": "system", "content": system_prompt()}, {"role": "user", "content": user}], temperature=0.45, max_tokens=14000, reasoning="high")
         return _split(groq.parse_json(ans)), user
     except Exception as e:  # noqa: BLE001
         if est_tokens(system_prompt(), user) > int(env("SMALL_REQUEST", str(SMALL_REQUEST))):      # Gemini and Groq both failed on a big request: write it in small parts
             print("::warning::the whole timeline could not be written in one go, writing it in parts:", str(e)[:120])
-            return _timeline_in_parts(user, prompt, plan_json, registry, words, voice_start, size, sfx_names, dur), user
+            return _timeline_in_parts(user, prompt, plan_json, registry, words, voice_start, size, sfx_names, dur, extra=extra), user
         raise
 
 
@@ -437,7 +437,7 @@ def image_department(brief_text, plan, supplied_images, have_video=False, has_mu
 PART_HOOK = {"load": None, "save": None}     # set by run.py: saves each finished part so /resume does not redo it
 
 
-def _timeline_in_parts(user, prompt, plan_json, registry, words, voice_start, size, sfx_names, dur):
+def _timeline_in_parts(user, prompt, plan_json, registry, words, voice_start, size, sfx_names, dur, extra=""):
     """Write the video in 2-4 short parts (about 9 seconds each), one after another, so every request stays small.
     Part 1 also sets palette, background and camera. Each later part sees what is already on screen."""
     import math
@@ -453,7 +453,7 @@ def _timeline_in_parts(user, prompt, plan_json, registry, words, voice_start, si
         ws = [w for w in words if t0 - 0.6 <= w["s"] + voice_start < t1 + 1.0]
         wtxt = words_block(ws, voice_start) if ws else "(no spoken words in this part)"
         msg = (
-            head + f"VOICE-OVER WORD TIMES for this part (word@seconds):\n{wtxt}\n\n" + tail_sfx + "\n\n"
+            head + f"VOICE-OVER WORD TIMES for this part (word@seconds):\n{wtxt}\n\n" + tail_sfx + "\n" + (str(extra) + "\n" if extra else "") + "\n"
             + f"YOU ARE WRITING PART {k + 1} OF {n}. The video is written in parts so every answer stays short. This part covers {t0:.1f}s to {t1:.1f}s of a {float(dur):.1f}s video.\n"
             + f"- Output ONLY layers whose start is from {t0:.1f}s up to {t1:.1f}s (they may end later). Give every layer id the prefix p{k + 1}_ . Use the exact word times above to sync.\n"
         )
