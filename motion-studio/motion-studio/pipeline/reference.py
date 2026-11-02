@@ -241,7 +241,11 @@ def extra_text(ref):
     elif mode == "changes":
         out += (f"The client wants the same structure WITH CHANGES: keep everything the same ({len(ref['scenes'])} scenes, rhythm, text animation, camera moves, transitions) except what the changes below ask. ")
     else:
-        out += f"Build the NEW video with the SAME structure: about {len(ref['scenes'])} scenes, the same rhythm (scene lengths close to these), the same kind of text animation, camera moves and transitions. "
+        out += (f"The client sent this reference to be FOLLOWED: build the NEW video with the same structure: {len(ref['scenes'])} scenes in the same order, the same rhythm, the same kind of text animation, camera moves, transitions and look. "
+                "Only the content (his product, pictures, words) is his own. ")
+    if mode in ("exact", "unknown", "") :
+        out += (f"If the client asks for a different total length than {ref.get('duration', 0):.0f}s, keep the same scenes in the same order and scale every scene time in the same proportion. "
+                "The brief may add 'be creative': that never means dropping the reference's structure. ")
     out += "Use ONLY the client's own words, brand, pictures and logo; never copy anything written in the reference.\n"
     if ag.get("brand") or ag.get("product"):
         out += f"THE NEW VIDEO IS FOR: brand {ag.get('brand') or '?'}, product {ag.get('product') or '?'}.\n"
