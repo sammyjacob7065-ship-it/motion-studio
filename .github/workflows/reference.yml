@@ -6,6 +6,14 @@ on:
       chat_id:
         description: "Telegram chat id"
         required: true
+      mode:
+        description: "read = read the reference video, chat = answer the client's message about it"
+        required: false
+        default: "read"
+
+concurrency:
+  group: reference-${{ inputs.chat_id }}
+  cancel-in-progress: false
 
 jobs:
   read:
@@ -45,4 +53,4 @@ jobs:
           VISION_MODEL: ${{ secrets.VISION_MODEL }}
         run: |
           P=$(find . -name reference.py -path "*pipeline*" | head -1)
-          python "$P" "${{ inputs.chat_id }}"
+          python "$P" "${{ inputs.chat_id }}" "${{ inputs.mode }}"
