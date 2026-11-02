@@ -588,10 +588,9 @@ def main(job):
                             plan["duration"] = round(min(60.0, float(registry[music[0]].get("duration") or 30)), 1)
                         mon.note("voice", f"music: {beat_info['bpm']:.0f} BPM")
         ref = brief.get("reference")
-        if ref and isinstance(ref, dict) and ref.get("scenes"):      # STYLE REFERENCE from a video the client likes: copy structure, pace and feel
-            lines = "\n".join(f"  {i + 1}. {sc.get('start', 0):.1f}-{sc.get('end', 0):.1f}s: {sc.get('what', '')} | text: {sc.get('text_on_screen', '')} | motion: {sc.get('motion', '')} | change: {sc.get('transition', '')}" for i, sc in enumerate(ref["scenes"][:30]))
-            extra += (f"STYLE REFERENCE (a video the client likes; its length {ref.get('duration', 0):.0f}s, pace {ref.get('pace', '')}, look: {ref.get('style', '')}, music: {ref.get('music', '')}). Build the NEW video with the SAME structure: about {len(ref['scenes'])} scenes, "
-                      f"the same rhythm (scene lengths close to these), the same kind of text animation, camera moves and transitions. Use ONLY the client's own words, brand, pictures and logo; never copy anything written in the reference.\n{lines}\n")
+        if ref and isinstance(ref, dict) and ref.get("scenes"):      # STYLE REFERENCE from a video the client likes: copy structure, pace and feel (exact, or with the changes he asked for)
+            import reference as _reference
+            extra += _reference.extra_text(ref)
             mon.note("plan", f"style reference used: {len(ref['scenes'])} scenes")
         _cut_cache = {}
 
