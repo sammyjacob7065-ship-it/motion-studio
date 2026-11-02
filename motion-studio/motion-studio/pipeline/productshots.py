@@ -153,16 +153,17 @@ GEN_RULES = ("The pictures are real photos of ONE product. Make a NEW photo of E
              "Professional product photography, sharp, clean, high detail.")
 
 
-def _gen_image(refs, text):
-    """One call to a Gemini image model. refs = list of jpeg bytes. Returns image bytes or None."""
+def _gemini_edit(refs, text):
+    """Gemini image model. Returns image bytes or None (raises RuntimeError with the reason when it cannot)."""
     ks = gemini.keys() if gemini else []
     if not ks:
-        return None
+        raise RuntimeError("no Gemini key")
     parts = [{"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(b).decode()}} for b in refs] + [{"text": text}]
     body = {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"responseModalities": ["IMAGE", "TEXT"], "temperature": 0.6}}
-    last = ""
+    last = "no image model answered"
     for m in image_models():
         if m in _BLOCKED:
+            last = _BLOCKED[m]
             continue
         for key in ks:
             try:
@@ -185,8 +186,96 @@ def _gen_image(refs, text):
             if r.status_code == 429:
                 continue                                   # another key
             break
-    LOG.append(last or "no image model answered")
-    return None
+    raise RuntimeError(last)
+
+
+def _agnes_edit(refs, text):
+    """Agnes image 2.1 flash in image-to-image mode (free keys of the studio). The real photos go in as data URIs in extra_body.image."""
+    import requests
+    try:
+        import imagegen
+        keys = imagegen._agnes_keys()
+    except Exception:  # noqa: BLE001
+        keys = []
+    if not keys:
+        raise RuntimeError("no Agnes key")
+    uris = ["data:image/jpeg;base64," + base64.b64encode(b).decode() for b in refs[:3]]
+    last = "Agnes failed"
+    for n in range(len(keys)):
+        key = keys[n % len(keys)]
+        try:
+            r = requests.post("https://apihub.agnes-ai.com/v1/images/generations", headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+                              json={"model": env("AGNES_EDIT_MODEL", "agnes-image-2.1-flash"), "prompt": text[:1800], "size": "1K", "ratio": "1:1", "extra_body": {"image": uris, "response_format": "b64_json"}}, timeout=360)
+            if r.status_code >= 400:
+                last = f"agnes {r.status_code} {r.text[:100]}"
+                continue
+            d = (r.json().get("data") or [{}])[0]
+            if d.get("b64_json"):
+                return base64.b64decode(d["b64_json"])
+            if d.get("url"):
+                return requests.get(d["url"], timeout=90).content
+            last = "agnes: no picture in answer"
+        except Exception as e:  # noqa: BLE001
+            last = "agnes " + str(e)[:100]
+    raise RuntimeError(last)
+
+
+def _cloudflare_edit(refs, text):
+    """Cloudflare FLUX.2 klein (reference-image editing, up to 4 input pictures, each smaller than 512x512). Multipart form."""
+    import requests
+    try:
+        import imagegen
+        acc = env("CLOUDFLARE_ACCOUNT_ID") or getattr(imagegen.K, "CLOUDFLARE_ACCOUNT", "")
+        tok = env("CLOUDFLARE_API_TOKEN") or getattr(imagegen.K, "CLOUDFLARE_TOKEN", "")
+    except Exception:  # noqa: BLE001
+        acc, tok = env("CLOUDFLARE_ACCOUNT_ID"), env("CLOUDFLARE_API_TOKEN")
+    if not acc or not tok:
+        raise RuntimeError("no Cloudflare key")
+    files = {"prompt": (None, text[:1800]), "width": (None, "1024"), "height": (None, "1024")}
+    for i, b in enumerate(refs[:4]):
+        im = Image.open(io.BytesIO(b)).convert("RGB")
+        im.thumbnail((500, 500))                               # the model accepts input pictures smaller than 512x512
+        o = io.BytesIO()
+        im.save(o, "JPEG", quality=90)
+        files[f"input_image_{i}"] = (f"ref{i}.jpg", o.getvalue(), "image/jpeg")
+    r = requests.post(f"https://api.cloudflare.com/client/v4/accounts/{acc}/ai/run/{env('CF_EDIT_MODEL', '@cf/black-forest-labs/flux-2-klein-9b')}", headers={"Authorization": "Bearer " + tok}, files=files, timeout=180)
+    if r.status_code >= 400:
+        raise RuntimeError(f"cloudflare {r.status_code} {r.text[:100]}")
+    if r.headers.get("content-type", "").startswith("image"):
+        return r.content
+    j = r.json()
+    if j.get("success") is False:
+        raise RuntimeError("cloudflare " + str(j.get("errors"))[:120])
+    res = j.get("result") or {}
+    return base64.b64decode(res.get("image") or j.get("image") or "")
+
+
+EDITORS = {"gemini": _gemini_edit, "agnes": _agnes_edit, "cloudflare": _cloudflare_edit}
+_DEAD = {}            # provider -> why: a provider without a key / credit is skipped for the rest of the job
+
+
+def providers():
+    order = [x.strip().lower() for x in env("PRODUCT_SHOT_PROVIDERS", "gemini,agnes,cloudflare").split(",") if x.strip()]
+    return [x for x in order if x in EDITORS]
+
+
+def _gen_image(refs, text, short=None, skip=()):
+    """Makes one picture from the real photos. Tries the providers in order (Gemini image, Agnes image-to-image, Cloudflare FLUX.2 edit).
+    Returns (image bytes, provider name) or (None, None). Providers listed in skip are not used (a provider whose picture was just rejected)."""
+    for name in providers():
+        if name in _DEAD or name in skip:
+            continue
+        try:
+            b = EDITORS[name](refs, text if name == "gemini" else (short or text))
+            if b and len(b) > 1500 and (b[:3] == b"\xff\xd8\xff" or b[:4] == b"\x89PNG" or b[:4] == b"RIFF"):
+                return b, name
+            LOG.append(f"{name}: broken picture")
+        except Exception as e:  # noqa: BLE001
+            why = str(e)[:140]
+            LOG.append(why)
+            if re.search(r"no \w+ key|401|402|403|unauthor|quota|credit|balance|limit:\s*0", why, re.I):
+                _DEAD[name] = why
+    return None, None
 
 
 # ---------------------------------------------------------------- 4. the check
@@ -265,6 +354,7 @@ def make(registry, paths, adir, work, prompt, ref, analyze, tg=None, n=None):
         shots = plan_shots(profile, have, count, ref_scenes, prompt)
         real = [_jpeg(paths[x]) for x in names]
         made_ai = made_fb = used_real = 0
+        by = {}
         for i, s in enumerate(shots):
             src = str(s.get("source", "generate"))
             nm = f"product_shot{i + 1}.png"
@@ -278,16 +368,23 @@ def make(registry, paths, adir, work, prompt, ref, analyze, tg=None, n=None):
                 new.append(sup)
                 continue
             text = GEN_RULES.format(hidden=str(profile.get("hidden_sides", ""))[:500], keep=str(profile.get("must_keep", ""))[:500], view=str(s.get("prompt") or s["view"])[:300])
-            tried = 0
-            while tried < 2 and not ok_path:
+            short = (f"Make a new photo of EXACTLY the product in the reference pictures: same shape, colours, materials, logo and text, nothing invented. View: {str(s.get('prompt') or s['view'])[:200]}. "
+                     f"Keep identical: {str(profile.get('must_keep', ''))[:300]}. Hidden sides follow the visible design: {str(profile.get('hidden_sides', ''))[:300]}. "
+                     "Plain light grey-white studio background, soft shadow, no hands, no people, no props, no text added, product photography, sharp.")
+            skip, tried = [], 0
+            while tried < 3 and not ok_path:
                 tried += 1
-                raw = _gen_image(real, text + (" PREVIOUS TRY WAS REJECTED BECAUSE: " + how if how else ""))
+                raw, who = _gen_image(real, text + (" PREVIOUS TRY WAS REJECTED BECAUSE: " + how if how else ""), short=short + (" Fix: " + how if how else ""), skip=skip)
                 if not raw:
                     break
                 good, how = verify(real, _to_jpeg(raw), s["view"])
                 if good:
                     open(dest, "wb").write(_to_png(raw))
                     ok_path = dest
+                    by[who] = by.get(who, 0) + 1
+                else:
+                    LOG.append(f"{who}: picture rejected ({how[:60]})")
+                    skip.append(who)                    # the next try uses the next provider
             if ok_path:
                 made_ai += 1
                 origin = "AI shot made from the client's photo"
@@ -304,7 +401,7 @@ def make(registry, paths, adir, work, prompt, ref, analyze, tg=None, n=None):
             registry[k], paths[k] = info, final
             new.append(k)
         if tg:
-            tg.send(f"📸 Product shots for {profile.get('product', 'your product')}: {len(shots)} planned, {made_ai} made by AI from your photo and checked, {made_fb} built from your real photo, {used_real} are your own photos."
+            tg.send(f"📸 Product shots for {profile.get('product', 'your product')}: {len(shots)} planned, {made_ai} made by AI from your photo and checked" + (" (" + ", ".join(f"{k} {v}" for k, v in by.items()) + ")" if by else "") + f", {made_fb} built from your real photo, {used_real} are your own photos."
                     + (("\nWhy some AI shots were not used: " + " | ".join(dict.fromkeys(LOG))[:400]) if LOG and made_fb else ""))
     except Exception as e:  # noqa: BLE001
         print("::warning::product shots skipped:", str(e)[:200])
