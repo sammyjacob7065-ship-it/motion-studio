@@ -23,16 +23,20 @@ BAD_PAGE = re.compile(r"login|signin|sign-in|register|cart|checkout|account|priv
 MAX_PAGES, MAX_DOWNLOADS, MAX_KEEP = 8, 70, 30
 
 
+INLINE_SITE = re.compile(r"(?:brand|picture|image)[ _-]?(?:site|website|web[ _-]?site)\s*[:=]\s*(.*?)(?=(?:brand|picture|image)[ _-]?(?:site|website|web[ _-]?site)\s*[:=]|$)", re.I)
+
+
 def sites_in(text):
-    """Returns (list of site urls, the script without the BRAND SITE lines)."""
+    """Returns (list of site urls, the script without the BRAND SITE lines). The words can stand anywhere in a line (a chat message), not only at its start."""
     urls = []
-    for m in SITE_LINE.finditer(str(text or "")):
-        for u in URL_RE.findall(m.group(1)):
-            u = u.rstrip(".)")
-            if not re.match(r"https?://", u, re.I):
-                u = "https://" + u
-            if u not in urls:
-                urls.append(u)
+    for ln in str(text or "").splitlines():
+        for m in INLINE_SITE.finditer(ln):
+            for u in URL_RE.findall(m.group(1)):
+                u = u.rstrip(".)")
+                if not re.match(r"https?://", u, re.I):
+                    u = "https://" + u
+                if u not in urls:
+                    urls.append(u)
     return urls, SITE_LINE.sub("", str(text or "")).strip("\n") + "\n"
 
 
