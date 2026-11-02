@@ -769,6 +769,17 @@ def main(job):
                     off = speech_off(t)
                     l["props"]["words"] = [{"w": w["w"], "s": round(w["s"] + off, 3), "e": round(w["e"] + off, 3)} for w in words]
         fill_captions(tl)
+        try:                                                       # REBRAND safety net: no word of the original brand may stay in the new video
+            _rb = brief.get("reference") if isinstance(brief.get("reference"), dict) else None
+            if _rb and _rb.get("rebrand_terms") and str((_rb.get("agreed") or {}).get("mode")) == "rebrand":
+                import rebrand as _rebrand
+                _ag = _rb.get("agreed") or {}
+                _new = str(_ag.get("brand_to") or _ag.get("brand") or "")
+                _rep, _found = _rebrand.scrub(tl, _rb["rebrand_terms"], _new, allowed=[_new])
+                if _rep or _found:
+                    tg.send("🛡️ Rebrand check: " + (f"I replaced the old brand name ({', '.join(dict.fromkeys(_rep))}) with {_new}. " if _rep else "") + (f"These original texts are still in the video, check them: {', '.join(_found[:6])}." if _found else ""))
+        except Exception as e:  # noqa: BLE001
+            print("::warning::rebrand check skipped:", str(e)[:100])
 
         # ---- 6. review (preview frames, vision check)
         if env("REVIEW", "0") == "1":      # the preview-frame check is OFF by default: it started the renderer 5 extra times (minutes) and no vision model is free now
