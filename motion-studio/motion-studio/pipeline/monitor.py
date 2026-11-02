@@ -7,6 +7,7 @@ STAGES = [
     ("brief", "📥", "Brief received"),
     ("assets", "🔍", "Checking your files"),
     ("plan", "🧠", "Director is planning"),
+    ("shots", "📸", "Making product shots"),
     ("stock", "🖼", "Getting pictures"),
     ("voice", "🎙", "Voice and timing"),
     ("timeline", "🎞", "Director is writing the timeline"),
