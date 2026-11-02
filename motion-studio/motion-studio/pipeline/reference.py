@@ -163,38 +163,151 @@ def _fix(spec, f):
 
 
 def ask_text(spec, level):
-    n = spec["needs"]
     head = {"gemini": "✅ Reference saved and read (Gemini).", "groq": "✅ Reference saved and read (Groq backup, from sampled frames + speech).",
             "facts": "✅ Reference saved. I could only measure it (cuts, length, colours) - I could not look inside, so I will copy its rhythm, not its content."}[level]
-    texts = ", ".join(str(t) for t in (n.get("texts") or [])) or "brand name, phone number"
     return (f"{head}\n\n{spec.get('summary', '')}\n\n"
             f"Structure: {len(spec['scenes'])} scenes, {spec['duration']:.0f}s, {spec.get('aspect', '9:16')}, pace {spec.get('pace', '?')}.\n\n"
-            "To make yours, send now (then your prompt or /go):\n"
-            f"- {n.get('pictures')} pictures (or tell me to generate them)\n"
-            f"- voice script of about {n.get('voice_script_words')} words (or your script file)\n"
-            + ("- your logo (send as File)\n" if n.get("logo") else "")
-            + f"- your texts: {texts}\n\n"
-            "I copy the structure, pace and feel - never the other creator's words, brand or pictures. /noreference clears it.")
+            "Now tell me, in your own words:\n"
+            "1) What is this for? The brand and the product (for example: a coffee brand, Milo, my clothing brand, a phone, a restaurant).\n"
+            "2) Do you want it EXACT (same structure, timing and style) or WITH CHANGES? If changes, say what to change.\n\n"
+            "We can talk as much as you like, ask me anything about it. When you are happy, send your script, or send /make and I write it from our chat.\n"
+            "I copy the structure, pace and feel, never the other creator's words, brand or pictures. /noreference clears it.")
 
 
-def main(chat):
+CHAT_SYSTEM = ("You are the reference consultant of a motion-graphics ad studio, talking with the client on Telegram. The client liked a reference video and wants a NEW video made with its structure, pace and feel, for HIS OWN brand and product. "
+               "You know the reference only through the reading below. Be smart, short, friendly and practical: plain words, short paragraphs, no markdown symbols, at most about 900 characters. "
+               "Find out two things: (1) the brand and the product the new video is for, (2) EXACT (same number of scenes, same timing, same camera moves, text animation and transitions) or WITH CHANGES (what to change, what to keep). "
+               "If the client asks something else about the reference or the plan, answer it. Never copy the reference's brand, words, pictures or logo: only structure and style. "
+               "Once the product is known, go through the reference scenes: say which scenes suit the product as they are, and which do not (for example a cap pop does not suit a shirt) and what you will show instead. "
+               "Once the product is known, give the exact list of what the client should send, tailored to the product (specific pictures, logo as File, texts, voice script words). Give the list once, then only update it when something changes. "
+               "End with the next step: send the script (or a .txt file), or send /make and the studio writes it from this chat. "
+               "Reply with JSON only.")
+CHAT_SCHEMA = ('{"reply":"what you say to the client","agreed":{"brand":"","product":"","mode":"exact|changes|unknown","changes":["each change the client asked for"],"keep":["what must stay the same"],'
+               '"scene_plan":[{"n":1,"show":"what scene n shows for the new product","note":"kept as the reference | changed because ..."}],"extra":"anything else the client said that matters"},'
+               '"needs":{"items":["specific things to send"],"voice_script_words":60},"ready":true,'
+               '"brief":"ONLY when brand, product and mode are known: a complete prompt for the studio to make the whole video: the brand and product, the exact or changed structure scene by scene, the mood, a voice-over written in full (about voice_script_words words) in simple natural English with a hook first, the look, and the end line. Otherwise empty."}')
+
+
+def _agreed(rf):
+    return (rf.get("spec") or {}).get("agreed") or {}
+
+
+def chat_turn(rf, user_text):
+    """One turn of the conversation. Returns (reply text, updated agreed dict, brief text or '')."""
+    spec = rf.get("spec") or {}
+    hist = rf.get("history") or []
+    ref = {k: spec.get(k) for k in ("summary", "duration", "aspect", "pace", "style", "music", "voiceover", "scenes", "needs", "notes")}
+    convo = "\n".join(f"{'CLIENT' if h.get('who') == 'c' else 'YOU'}: {h.get('text', '')}" for h in hist[-14:])
+    prompt = (f"REFERENCE READING:\n{json.dumps(ref, separators=(',', ':'))[:7000]}\n\nWHAT IS AGREED SO FAR:\n{json.dumps(_agreed(rf), separators=(',', ':'))}\n\n"
+              f"CONVERSATION SO FAR:\n{convo or '(nothing yet)'}\n\nNEW MESSAGE FROM THE CLIENT:\n{user_text}\n\nAnswer with this JSON (update \"agreed\" with everything known so far, keep earlier facts):\n{CHAT_SCHEMA}")
+    ans, err = None, ""
+    if gemini.available():
+        try:
+            ans = gemini.parse_json(gemini.generate(prompt, system=CHAT_SYSTEM, temperature=0.4, rounds=2))
+        except Exception as e:  # noqa: BLE001
+            err = "Gemini: " + str(e)[:100]
+            print("::warning::reference chat by Gemini failed:", err)
+    if not isinstance(ans, dict):
+        try:
+            ans = groq.parse_json(groq.chat([{"role": "system", "content": CHAT_SYSTEM}, {"role": "user", "content": prompt}], temperature=0.4, max_tokens=5000, reasoning="medium"))
+        except Exception as e:  # noqa: BLE001
+            err += " Groq: " + str(e)[:100]
+            print("::warning::reference chat by Groq failed:", str(e)[:100])
+    if not isinstance(ans, dict) or not str(ans.get("reply", "")).strip():
+        return None, _agreed(rf), ""
+    ag = ans.get("agreed") if isinstance(ans.get("agreed"), dict) else {}
+    old = _agreed(rf)
+    merged = {**old, **{k: v for k, v in ag.items() if v not in (None, "", [], {})}}
+    if str(merged.get("mode", "")).lower() not in ("exact", "changes"):
+        merged["mode"] = "unknown"
+    needs = ans.get("needs") if isinstance(ans.get("needs"), dict) else {}
+    if needs:
+        merged["needs"] = needs
+    brief = str(ans.get("brief") or "").strip() if (merged.get("product") and merged["mode"] != "unknown") else ""
+    if brief:
+        merged["brief"] = brief
+    return str(ans["reply"]).strip()[:1500], merged, brief
+
+
+def extra_text(ref):
+    """The reference part of the studio's instructions. Plain facts for the director: the reading, the client's agreement (exact or changes, his product) and the scene plan."""
+    lines = "\n".join(f"  {i + 1}. {sc.get('start', 0):.1f}-{sc.get('end', 0):.1f}s: {sc.get('what', '')} | text: {sc.get('text_on_screen', '')} | motion: {sc.get('motion', '')} | change: {sc.get('transition', '')}" for i, sc in enumerate(ref["scenes"][:30]))
+    ag = ref.get("agreed") or {}
+    mode = str(ag.get("mode", "unknown")).lower()
+    out = (f"STYLE REFERENCE (a video the client likes; its length {ref.get('duration', 0):.0f}s, pace {ref.get('pace', '')}, look: {ref.get('style', '')}, music: {ref.get('music', '')}). ")
+    if mode == "exact":
+        out += (f"The client wants it EXACT: build the NEW video with EXACTLY the same structure: {len(ref['scenes'])} scenes, each scene starting and ending at the same times (within a quarter of a second), the same kind of text animation, the same camera moves, the same transitions, the same pace and look. ")
+    elif mode == "changes":
+        out += (f"The client wants the same structure WITH CHANGES: keep everything the same ({len(ref['scenes'])} scenes, rhythm, text animation, camera moves, transitions) except what the changes below ask. ")
+    else:
+        out += f"Build the NEW video with the SAME structure: about {len(ref['scenes'])} scenes, the same rhythm (scene lengths close to these), the same kind of text animation, camera moves and transitions. "
+    out += "Use ONLY the client's own words, brand, pictures and logo; never copy anything written in the reference.\n"
+    if ag.get("brand") or ag.get("product"):
+        out += f"THE NEW VIDEO IS FOR: brand {ag.get('brand') or '?'}, product {ag.get('product') or '?'}.\n"
+    if ag.get("changes"):
+        out += "CHANGES THE CLIENT ASKED FOR:\n" + "\n".join(f"  - {c}" for c in ag["changes"][:12]) + "\n"
+    if ag.get("keep"):
+        out += "KEEP THE SAME: " + "; ".join(str(k) for k in ag["keep"][:12]) + "\n"
+    if ag.get("scene_plan"):
+        out += "SCENE PLAN FOR THE CLIENT'S PRODUCT (follow it):\n" + "\n".join(f"  scene {p.get('n')}: {p.get('show', '')} ({p.get('note', '')})" for p in ag["scene_plan"][:30] if isinstance(p, dict)) + "\n"
+    if ag.get("extra"):
+        out += "ALSO: " + str(ag["extra"])[:500] + "\n"
+    return out + "REFERENCE SCENES:\n" + lines + "\n"
+
+
+def _now_ms():
+    return int(__import__("time").time() * 1000)
+
+
+def main(chat, mode="read"):
     from sb import Store
     from tg import Telegram
     store = Store()
     tg = Telegram(chat)
     base = f"motion/{chat}/reference"
+    if mode == "chat":
+        return chat_main(store, tg, base)
     work = os.path.abspath(f"work/ref_{chat}")
     os.makedirs(work, exist_ok=True)
     try:
         path = store.download(f"{base}/ref.mp4", os.path.join(work, "ref.mp4"))
         spec, level = read(path)
         spec["level"] = level
-        store.put_json(f"{base}/spec.json", {"spec": spec, "created": __import__("time").time(), "used": False})
+        spec["agreed"] = {"brand": "", "product": "", "mode": "unknown", "changes": [], "keep": [], "scene_plan": [], "extra": ""}
+        store.put_json(f"{base}/spec.json", {"spec": spec, "created": _now_ms(), "used": False, "chat": True, "history": [], "seen": []})
+        store.put_json(f"{base}/inbox.json", {"msgs": []})
         tg.send(ask_text(spec, level))
     except Exception as e:  # noqa: BLE001
         tg.send("⚠️ I could not read the reference: " + str(e)[:200] + "\nSend the video again with /reference.")
         raise
 
 
+def chat_main(store, tg, base):
+    """The client wrote while a reference is open: read what is new in the inbox, answer, keep what was agreed."""
+    rf = store.get_json(f"{base}/spec.json") or {}
+    if not rf.get("spec") or rf.get("used"):
+        return
+    inbox = store.get_json(f"{base}/inbox.json") or {"msgs": []}
+    seen = set(rf.get("seen") or [])
+    pending = [m for m in inbox.get("msgs", []) if m.get("id") not in seen and str(m.get("text", "")).strip()]
+    if not pending:
+        return
+    rf["seen"] = sorted(seen | {m["id"] for m in pending})[-200:]
+    store.put_json(f"{base}/spec.json", rf)                     # claimed: a second worker does not answer the same message
+    text = "\n".join(str(m["text"]).strip() for m in pending)[:3000]
+    reply, agreed, brief = chat_turn(rf, text)
+    if not reply:
+        tg.send("⚠️ I could not think about that just now (the AI was busy). Send your message again in a minute.")
+        rf["seen"] = [i for i in rf["seen"] if i not in {m["id"] for m in pending}]
+        store.put_json(f"{base}/spec.json", rf)
+        return
+    rf = store.get_json(f"{base}/spec.json") or rf              # newer than my claim? keep it
+    rf["spec"]["agreed"] = agreed
+    rf["history"] = ((rf.get("history") or []) + [{"who": "c", "text": text[:600]}, {"who": "s", "text": reply[:600]}])[-24:]
+    rf["created"] = _now_ms()                                   # the conversation keeps the reference alive
+    store.put_json(f"{base}/spec.json", rf)
+    tg.send(reply)
+
+
 if __name__ == "__main__":
-    main(sys.argv[1])
+    main(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "read")
