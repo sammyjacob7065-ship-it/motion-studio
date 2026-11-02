@@ -1,4 +1,4 @@
-"""Reference department. The client sends a motion video he likes; this reads it and saves a short 'spec' (structure, pace, look, what to provide).
+"""Rebrand / reference department (the deep reading and the creative chat live in rebrand.py). The client sends a motion video he likes; this reads it and saves a short 'spec' (structure, pace, look, what to provide).
 Reading levels (first that works wins):  1) Gemini watches the video   2) Groq backup: sampled frames (vision model) + speech (Whisper) + facts   3) facts only (cuts, length, colours, beat), said honestly.
 Run:  python pipeline/reference.py <chat_id>      (reads motion/<chat>/reference/ref.mp4, writes motion/<chat>/reference/spec.json, tells the client on Telegram)"""
 import json
@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import beats  # noqa: E402
 import gemini  # noqa: E402
 import groq  # noqa: E402
+import rebrand  # noqa: E402
 from common import env  # noqa: E402
 
 SYSTEM = ("You are a senior motion designer reading a reference video for a studio that must build a NEW video with the same structure, pace and feel. "
@@ -135,6 +136,11 @@ def read(path):
     errs = []
     if gemini.available():
         try:
+            return _fix(rebrand.deep_by_gemini(path, f, said, _fact_text(f, said)), f), "gemini"          # the deep reading: every element, style and animation
+        except Exception as e:  # noqa: BLE001
+            errs.append("Gemini deep: " + str(e)[:100])
+            print("::warning::deep reading failed, trying the short reading:", errs[-1])
+        try:
             return _fix(by_gemini(path, f, said), f), "gemini"
         except Exception as e:  # noqa: BLE001
             errs.append("Gemini: " + str(e)[:100])
@@ -194,44 +200,14 @@ def _agreed(rf):
 
 
 def chat_turn(rf, user_text):
-    """One turn of the conversation. Returns (reply text, updated agreed dict, brief text or '')."""
-    spec = rf.get("spec") or {}
-    hist = rf.get("history") or []
-    ref = {k: spec.get(k) for k in ("summary", "duration", "aspect", "pace", "style", "music", "voiceover", "scenes", "needs", "notes")}
-    convo = "\n".join(f"{'CLIENT' if h.get('who') == 'c' else 'YOU'}: {h.get('text', '')}" for h in hist[-14:])
-    prompt = (f"REFERENCE READING:\n{json.dumps(ref, separators=(',', ':'))[:7000]}\n\nWHAT IS AGREED SO FAR:\n{json.dumps(_agreed(rf), separators=(',', ':'))}\n\n"
-              f"CONVERSATION SO FAR:\n{convo or '(nothing yet)'}\n\nNEW MESSAGE FROM THE CLIENT:\n{user_text}\n\nAnswer with this JSON (update \"agreed\" with everything known so far, keep earlier facts):\n{CHAT_SCHEMA}")
-    ans, err = None, ""
-    if gemini.available():
-        try:
-            ans = gemini.parse_json(gemini.generate(prompt, system=CHAT_SYSTEM, temperature=0.4, rounds=2))
-        except Exception as e:  # noqa: BLE001
-            err = "Gemini: " + str(e)[:100]
-            print("::warning::reference chat by Gemini failed:", err)
-    if not isinstance(ans, dict):
-        try:
-            ans = groq.parse_json(groq.chat([{"role": "system", "content": CHAT_SYSTEM}, {"role": "user", "content": prompt}], temperature=0.4, max_tokens=5000, reasoning="medium"))
-        except Exception as e:  # noqa: BLE001
-            err += " Groq: " + str(e)[:100]
-            print("::warning::reference chat by Groq failed:", str(e)[:100])
-    if not isinstance(ans, dict) or not str(ans.get("reply", "")).strip():
-        return None, _agreed(rf), ""
-    ag = ans.get("agreed") if isinstance(ans.get("agreed"), dict) else {}
-    old = _agreed(rf)
-    merged = {**old, **{k: v for k, v in ag.items() if v not in (None, "", [], {})}}
-    if str(merged.get("mode", "")).lower() not in ("exact", "changes"):
-        merged["mode"] = "unknown"
-    needs = ans.get("needs") if isinstance(ans.get("needs"), dict) else {}
-    if needs:
-        merged["needs"] = needs
-    brief = str(ans.get("brief") or "").strip() if (merged.get("product") and merged["mode"] != "unknown") else ""
-    if brief:
-        merged["brief"] = brief
-    return str(ans["reply"]).strip()[:1500], merged, brief
+    """One turn of the conversation with the creative director. Returns (reply text, updated agreed dict, brief text or '')."""
+    return rebrand.chat_turn(rf, user_text)
 
 
 def extra_text(ref):
     """The reference part of the studio's instructions. Plain facts for the director: the reading, the client's agreement (exact or changes, his product) and the scene plan."""
+    if ref.get("deep"):
+        return rebrand.extra_text(ref)
     lines = "\n".join(f"  {i + 1}. {sc.get('start', 0):.1f}-{sc.get('end', 0):.1f}s: {sc.get('what', '')} | text: {sc.get('text_on_screen', '')} | motion: {sc.get('motion', '')} | change: {sc.get('transition', '')}" for i, sc in enumerate(ref["scenes"][:30]))
     ag = ref.get("agreed") or {}
     mode = str(ag.get("mode", "unknown")).lower()
@@ -278,10 +254,14 @@ def main(chat, mode="read"):
         path = store.download(f"{base}/ref.mp4", os.path.join(work, "ref.mp4"))
         spec, level = read(path)
         spec["level"] = level
+        try:
+            spec["rebrand_terms"] = rebrand.old_terms(spec)                 # the original brand's words: nothing of them may reach the new video
+        except Exception as e:  # noqa: BLE001
+            print("old brand words not listed:", str(e)[:80])
         spec["agreed"] = {"brand": "", "product": "", "mode": "unknown", "changes": [], "keep": [], "scene_plan": [], "extra": ""}
         store.put_json(f"{base}/spec.json", {"spec": spec, "created": _now_ms(), "used": False, "chat": True, "history": [], "seen": []})
         store.put_json(f"{base}/inbox.json", {"msgs": []})
-        tg.send(ask_text(spec, level))
+        tg.send(rebrand.inventory_text(spec, level))
     except Exception as e:  # noqa: BLE001
         tg.send("⚠️ I could not read the reference: " + str(e)[:200] + "\nSend the video again with /reference.")
         raise
