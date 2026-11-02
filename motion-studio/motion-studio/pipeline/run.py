@@ -19,6 +19,7 @@ import director  # noqa: E402
 import groq  # noqa: E402
 import imagegen  # noqa: E402
 import openimages  # noqa: E402
+import productshots  # noqa: E402
 import mix  # noqa: E402
 import pronounce  # noqa: E402
 import render  # noqa: E402
@@ -318,6 +319,14 @@ def main(job):
             resumed.append("pictures")
         else:
             before = set(registry)
+            try:
+                if productshots.wanted(brief.get("prompt", ""), brief.get("reference"), registry):      # one photo of a product -> many views of it, to fit the reference
+                    stage = "Making product shots"
+                    mon.stage("shots")
+                    _new = productshots.make(registry, paths, adir, work, brief.get("prompt", ""), brief.get("reference"), A.analyze, tg)
+                    mon.done_stage("shots", f"{len(_new)} shots")
+            except Exception as e:  # noqa: BLE001
+                print("::warning::product shots skipped:", str(e)[:150])
             if plan.get("stock"):
                 stage = "Getting pictures"
                 mon.stage("stock")
@@ -592,6 +601,7 @@ def main(job):
             import reference as _reference
             extra += _reference.extra_text(ref)
             mon.note("plan", f"style reference used: {len(ref['scenes'])} scenes")
+        extra += productshots.director_text(registry)
         _cut_cache = {}
 
         def _cut_asset(name):
