@@ -115,6 +115,8 @@ def asset_table(registry):
             bits.append("shows: " + str(d.get("what", ""))[:120] + (" [logo]" if d.get("is_logo") else "") + (" [has text]" if d.get("has_text") else ""))
         for f in a.get("flags", []):
             bits.append("WARNING " + f)
+        if a.get("shot"):
+            bits.append(f"PRODUCT SHOT: the client's product seen from this view: {a['shot']}")
         if a.get("part"):
             bits.append(f"PART '{a['part']}' (a separate cut-out piece for an animation)")
         if a.get("animated"):
