@@ -180,6 +180,7 @@ CHAT_SYSTEM = ("You are the reference consultant of a motion-graphics ad studio,
                "If the client asks something else about the reference or the plan, answer it. Never copy the reference's brand, words, pictures or logo: only structure and style. "
                "Once the product is known, go through the reference scenes: say which scenes suit the product as they are, and which do not (for example a cap pop does not suit a shirt) and what you will show instead. "
                "Once the product is known, give the exact list of what the client should send, tailored to the product (specific pictures, logo as File, texts, voice script words). Give the list once, then only update it when something changes. "
+               "You cannot open links or look at websites yourself, so never say you pulled or downloaded anything. If the client shares a website link, say it is noted and that the studio reads the site, and takes its real pictures, when the video is made (only for brands he is allowed to use); the studio uses whatever it finds and makes the rest by AI. Tell him that sending his own clear product photos as Files gives the sharpest result. "
                "End with the next step: send the script (or a .txt file), or send /make and the studio writes it from this chat. "
                "Reply with JSON only.")
 CHAT_SCHEMA = ('{"reply":"what you say to the client","agreed":{"brand":"","product":"","mode":"exact|changes|unknown","changes":["each change the client asked for"],"keep":["what must stay the same"],'
@@ -302,6 +303,16 @@ def chat_main(store, tg, base):
         store.put_json(f"{base}/spec.json", rf)
         return
     rf = store.get_json(f"{base}/spec.json") or rf              # newer than my claim? keep it
+    sites = list(agreed.get("sites") or [])
+    for u in __import__("re").findall(r"https?://[^\s)>\"']+", text):                 # a website link the client shared: the studio reads it when the video is made
+        u = u.rstrip(".,;")
+        if u not in sites and len(sites) < 3:
+            sites.append(u)
+    if sites:
+        agreed["sites"] = sites
+    if agreed.get("brief") and sites:
+        body = "\n".join(ln for ln in str(agreed["brief"]).splitlines() if not ln.strip().upper().startswith("BRAND SITE"))
+        agreed["brief"] = "".join(f"BRAND SITE: {u}\n" for u in sites) + body
     rf["spec"]["agreed"] = agreed
     rf["history"] = ((rf.get("history") or []) + [{"who": "c", "text": text[:600]}, {"who": "s", "text": reply[:600]}])[-24:]
     rf["created"] = _now_ms()                                   # the conversation keeps the reference alive
