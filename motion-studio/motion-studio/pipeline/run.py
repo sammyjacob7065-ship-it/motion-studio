@@ -19,6 +19,7 @@ import director  # noqa: E402
 import groq  # noqa: E402
 import imagegen  # noqa: E402
 import openimages  # noqa: E402
+import origedit  # noqa: E402
 import productshots  # noqa: E402
 import mix  # noqa: E402
 import pronounce  # noqa: E402
@@ -192,6 +193,107 @@ def _ck_file(store, job, name, path):
         return False
 
 
+def _swap_items(brief):
+    """A swap or a rebrand of a video the client sent: his own video is EDITED (texts swapped, brand colours moved), never rebuilt.
+    Returns (text swaps, colour swaps) or None when there is nothing to edit that way."""
+    ref = brief.get("reference")
+    if not isinstance(ref, dict):
+        return None
+    ag = ref.get("agreed") or {}
+    if str(ag.get("mode", "")).lower() not in ("swap", "rebrand"):
+        return None
+    items, cols = origedit.items_from(ag), origedit.colors_from(ag)
+    if str(ag.get("mode", "")).lower() == "rebrand" or items or cols:
+        return items, cols                                    # a rebrand always edits the client's video (logos and products are found inside)
+    return None
+
+
+def _client_assets(brief, store, work):
+    """The client's own pictures for a rebrand (his logo, his product photos), described, with the other product angles added."""
+    adir = os.path.join(work, "assets")
+    os.makedirs(adir, exist_ok=True)
+    registry, paths = {}, {}
+    for a in brief.get("assets", []):
+        try:
+            dest = os.path.join(adir, os.path.basename(a["path"]))
+            store.download(a["path"], dest)
+            final, info, flags = A.analyze(dest, work)
+            if info.get("kind") == "image":
+                info["flags"], info["origin"] = flags, "supplied by client"
+                registry[os.path.basename(final)], paths[os.path.basename(final)] = info, final
+        except Exception as e:  # noqa: BLE001
+            print("::warning::client file not usable:", str(e)[:100])
+    if registry:
+        A.describe_images(registry, paths, groq.chat)
+    return registry, paths, adir
+
+
+def _edit_original(job, brief, store, tg, mon, work, items, cols=()):
+    """Edits the original video of a swap or a rebrand: same pictures, motion and music; the named texts, the brand colours, the brand's logo and its product are swapped for the client's. Delivers it like any other job."""
+    import objswap
+    mon.stage("edit", f"{len(items)} texts" + (f", {len(cols)} colours" if cols else ""))
+    src = store.download(f"motion/{brief['chat_id']}/reference/ref.mp4", os.path.join(work, "original.mp4"))
+    out = os.path.join(work, "final.mp4")
+    ref = brief.get("reference") or {}
+    objects, missing = [], []
+    if str((ref.get("agreed") or {}).get("mode", "")).lower() == "rebrand":
+        fps0, W0, H0 = origedit.probe(src)
+        dur = float(origedit.subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", src], capture_output=True, text=True).stdout.strip() or 0)
+        els = objswap.merge_same(objswap.elements_from(ref, dur))
+        if els:
+            registry, paths, adir = _client_assets(brief, store, work)
+            logos = [n for n, a in registry.items() if (a.get("describe") or {}).get("is_logo")]
+            prods = [n for n in registry if n not in logos]
+            if prods and any(e["kind"] == "product" for e in els) and productshots.wanted(brief.get("prompt", ""), ref, registry):
+                try:
+                    productshots.make(registry, paths, adir, work, brief.get("prompt", ""), ref, A.analyze, tg)
+                    prods = [n for n in registry if n not in logos and (registry[n].get("kind") == "image")]
+                except Exception as e:  # noqa: BLE001
+                    print("::warning::product shots skipped:", str(e)[:100])
+            la, pa = objswap.load_assets([paths[n] for n in logos if n in paths]), objswap.load_assets([paths[n] for n in prods if n in paths])
+            for e in els:
+                pool = la if e["kind"] == "logo" else pa
+                if pool:
+                    objects.append({"element": e, "assets": pool})
+                else:
+                    missing.append(f"{e['kind']} ({e['desc'][:40]})")
+    rep, eng, objrep = origedit.edit(src, out, items, colors=list(cols) or None, objects=objects)
+    found = [r for r in rep.values() if r["found"]]
+    lost = [r for r in rep.values() if not r["found"]]
+    objdone = [o for o in objrep if o["found"]]
+    if items and not found and not cols and not objdone:
+        raise RuntimeError("I could not find any of these texts in your video: " + "; ".join(r["old"] for r in lost)[:300] + ". The text may be too stylised or 3D for me to read. Tell me exactly how each text is written on screen, or send a clearer copy of the video.")
+    mon.done_stage("edit", f"{len(found)} of {len(items)} texts" + (f", {len(cols)} colours" if cols else "") + (f", {len(objdone)} logos/products" if objects else "") + f" ({eng})")
+    store.upload_file(f"motion/jobs/{job}/final.mp4", out, "video/mp4")
+    url = store.signed_url(f"motion/jobs/{job}/final.mp4")
+    fps, W, H = origedit.probe(out)
+    dur = origedit.subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", out], capture_output=True, text=True).stdout.strip()
+    lines = [f"✅ Your video is ready ({W}x{H}, {float(dur or 0):.0f}s). Your own video, structure, animation and music are kept; the brand's texts, colours, logo and product were swapped for yours."]
+    for r in found:
+        lines.append(f"• {r['old']} -> {r['new'] or 'removed'}")
+    if cols:
+        lines.append("🎨 Brand colours moved: " + ", ".join(f"{a} -> {b}" for a, b in cols))
+    for o in objdone:
+        lines.append(f"🔁 {o['kind']} swapped (scene {o['scene']}, {o['desc'][:40]})")
+    for o in objrep:
+        if not o["found"]:
+            lines.append(f"⚠️ I could not find the {o['kind']} ({o['desc'][:40]}) in the video, left as it is.")
+    if missing:
+        lines.append("⚠️ I had nothing to put for: " + "; ".join(missing)[:200] + ". Send your logo / product photo as Files and send /rebrand again.")
+    if lost:
+        lines.append("⚠️ Text not found in the video (not changed): " + "; ".join(r["old"] for r in lost)[:300])
+    lines.append("Wrong or missing something? Send /rebrand and the original video again, then tell me the corrections.")
+    size_mb = os.path.getsize(out) / 1e6
+    if size_mb <= 48:
+        try:
+            tg.send_video(out, "\n".join(lines))
+        except Exception:  # noqa: BLE001
+            tg.send("\n".join(lines) + ("\nDownload: " + url if url else ""))
+    else:
+        tg.send("\n".join(lines) + f"\n\nThe file is {size_mb:.0f} MB, too big for Telegram. Download (7 days):\n{url}")
+    mon.finish(url, "; ".join(lines[1:3]))
+
+
 def main(job):
     store = Store()
     voice.wake()                       # wake the free voice server now, while the director works
@@ -242,6 +344,11 @@ def main(job):
     os.makedirs(adir, exist_ok=True)
     stage = "start"
     try:
+        _sw = _swap_items(brief) if not brief.get("edit_of") else None
+        if _sw:
+            stage = "Editing your video"
+            _edit_original(job, brief, store, tg, mon, work, _sw[0], _sw[1])
+            return
         # ---- 1. files
         stage = "Checking your files"
         mon.stage("brief", f"{len(brief['assets'])} files, {len(brief.get('urls', []))} links")
