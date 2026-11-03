@@ -35,14 +35,17 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: System packages (ffmpeg, browser libraries)
+      - name: System packages (ffmpeg, text reader, browser libraries)
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg libnss3 libdbus-1-3 libatk1.0-0 libgbm-dev libxrandr2 libxkbcommon-dev libxfixes3 libxcomposite1 libxdamage1 libatk-bridge2.0-0 libpango-1.0-0 libcairo2 libcups2
+          sudo apt-get install -y ffmpeg tesseract-ocr libnss3 libdbus-1-3 libatk1.0-0 libgbm-dev libxrandr2 libxkbcommon-dev libxfixes3 libxcomposite1 libxdamage1 libatk-bridge2.0-0 libpango-1.0-0 libcairo2 libcups2
           sudo apt-get install -y libasound2t64 || sudo apt-get install -y libasound2
 
       - name: Python packages
-        run: pip install requests pillow
+        run: pip install requests pillow numpy opencv-python-headless
+
+      - name: Better text reader (optional)
+        run: pip install rapidocr-onnxruntime || true
 
       - name: Remember the engine packages and browser (saves minutes)
         uses: actions/cache@v4
