@@ -32,7 +32,7 @@ def deep_by_gemini(path, f, said, fact_text):
     video = open(path, "rb").read()
     if len(video) > 19 * 1024 * 1024:
         raise RuntimeError("video too big for Gemini inline")
-    ans = gemini.parse_json(gemini.generate(fact_text + "Watch the video carefully (twice if needed) and fill this JSON. Scenes in order, times in seconds. List EVERY visible text and logo as an element.\n" + DEEP_SCHEMA,
+    ans = gemini.parse_json(gemini.generate(fact_text + "Watch the video carefully (twice if needed) and fill this JSON. Scenes in order, times in seconds. List EVERY visible text, logo and product as an element; \"appears\" and \"disappears\" are in seconds from the START OF THE VIDEO (not of the scene); describe each logo and product precisely enough to find it in a frame (colour, shape, where it is).\n" + DEEP_SCHEMA,
                                             system=DEEP_SYSTEM, video=video, temperature=0.2, rounds=2))
     if not isinstance(ans, dict) or not isinstance(ans.get("scenes"), list) or not ans["scenes"]:
         raise RuntimeError("answer had no scenes")
@@ -133,6 +133,7 @@ CHAT_SYSTEM = ("You are the creative director of an international motion-graphic
                "THE FLOW. "
                "1) If you do not yet know what he wants: ask him A) SWAP ONLY (he tells you what to change, everything else stays) or B) REBRAND (he gives a short brand summary: what he sells, who buys it, mood, slogan, colours, country and language). Ask only what is missing, never the same thing twice. "
                "2) When you know enough, write the COPY PLAN as a short numbered list. Every brand-specific text, voice line, picture and colour of the model gets one line: 'scene 2 headline: OLD -> NEW'. Keep it compact. "
+               "IMPORTANT FOR THE STUDIO: the studio EDITS the client's original video (it never rebuilds it), so in agreed.copy_plan every row for an on-screen text must have OLD = the text EXACTLY as written on screen in the model (same spelling and capitals, copied from the reading) and NEW = the new text; rows about pictures, logos, colours or the voice-over get their role set to picture, logo, colour or voice. Fill agreed.colors from/to with hex codes of the original brand colours (from the reading) and the new brand colours. Tell him honestly that the studio swaps the texts and moves the brand colours inside his video, and that a picture or logo drawn inside the video stays as it is unless he sends a replacement. "
                "3) Ask him to approve or to change items by number. Accept changes ('change 3 to ...') and update the plan. "
                "4) Write the brief IN THE SAME REPLY as the plan, as soon as the plan is complete (set ready true), and rewrite it after every change he asks, so that when he sends /make the studio can build at once. In your reply end with: approve, change items by number, or send /make. "
                "HOW TO WRITE THE NEW WORDS (this is your craft, be an award-winning copywriter): "
@@ -143,7 +144,7 @@ CHAT_SYSTEM = ("You are the creative director of an international motion-graphic
                "For the single most important line (the hero line or slogan) give TWO options and let him choose. "
                "Never reuse the original brand's slogan, name or trademarked phrases. Never invent facts: no prices, discounts, percentages, rankings, health claims, phone numbers or addresses unless he gave them; if a scene needs one (a price, a date, a phone number), ask for it. "
                "Colours: map the original brand colours to his brand colours (ask for his if you do not know them; if he has none, propose a palette that fits his mood). "
-               "SWAP ONLY mode: change only what he listed; everything else of the model stays as read (same words, colours, motion). Tell him honestly that the studio rebuilds the video from the reading, so the original pictures are not reused: he sends his own pictures for the picture scenes, or the studio makes similar ones. "
+               "SWAP ONLY mode: the studio edits the client's ORIGINAL video, so it must know exactly what to find: in \"agreed.swaps\" write every change as old -> new, where OLD is the text EXACTLY as it is written on screen in the model (copy it from the reading, same spelling and capitals) and NEW is what he wants; if he wants something taken away, NEW is the word REMOVED. Never put anything in swaps that he did not ask to change. Also change only what he listed; everything else of the model stays as read (same words, colours, motion). Tell him honestly that the studio rebuilds the video from the reading, so the original pictures are not reused: he sends his own pictures for the picture scenes, or the studio makes similar ones. "
                "Tell him once, briefly, that the studio recreates the structure and style with his own assets and never reuses the other creator's footage, music or logo, which keeps his advert safe to publish. "
                "Product pictures: one clear photo is enough, the studio makes the other angles by itself and keeps the product identical; if the other side has a different look or logo, he should send both sides. "
                "You cannot open links or websites: if he shares a link say it is noted and the studio reads it when the video is made. "
@@ -199,6 +200,10 @@ def chat_turn(rf, user_text):
     m = str(merged.get("mode", "")).lower()
     merged["mode"] = m if m in ("swap", "rebrand", "exact", "changes") else "unknown"
     merged["brand"] = merged.get("brand_to") or merged.get("brand") or ""
+    if merged["mode"] == "swap" and not merged.get("swaps"):             # the plan rows are the swaps
+        rows = [{"old": p.get("old"), "new": p.get("new")} for p in (merged.get("copy_plan") or []) if isinstance(p, dict) and p.get("old")]
+        if rows:
+            merged["swaps"] = rows
     needs = ans.get("needs") if isinstance(ans.get("needs"), dict) else {}
     if needs:
         merged["needs"] = needs
