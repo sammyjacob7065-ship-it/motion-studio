@@ -17,6 +17,7 @@ import tempfile
 
 import cv2
 import numpy as np
+import cleaner
 from PIL import Image, ImageDraw, ImageFont
 
 LOG = []
@@ -499,6 +500,7 @@ def edit(src, out, items, progress=None, colors=None, objects=None):
         d["dref"] = max(1e-4, float(np.percentile(dens, 90)))
     # second sweep: paint
     wr = Writer(src, out, fps, W, H)
+    quality = {}
     try:
         for fi, fr in enumerate(read_frames(src, fps, W, H)):
             for ob, sw in swaps:                                    # logos and products first, the texts on top
@@ -512,11 +514,15 @@ def edit(src, out, items, progress=None, colors=None, objects=None):
                 roi = fr[y0:y1, x0:x1].copy()
                 ib = (tr[fi][0] - x0, tr[fi][1] - y0, tr[fi][2] - x0, tr[fi][3] - y0)
                 bg, _tc, _s = _bg_and_text(roi, ib)
-                m, alpha = _mask(roi, bg, d["color"], grow=2)
+                _m, alpha = _mask(roi, bg, d["color"], grow=0)                 # how visible the old text is right now (for the new text's fade)
                 if alpha < 0.04:
                     continue
-                clean = cv2.inpaint(roi, (m * 255).astype(np.uint8), 4, cv2.INPAINT_TELEA)
-                roi = np.where(m[..., None] > 0, clean, roi)               # the old text is always painted away completely, whatever its opacity
+                th_ = tr[fi][3] - tr[fi][1]
+                cp = int(th_ * 0.9) + 10                                      # the CLEANER: the whole area around the text, glow and shadow included, is rebuilt first
+                X0, Y0, X1, Y1 = max(0, tr[fi][0] - cp), max(0, tr[fi][1] - cp), min(W, tr[fi][2] + cp), min(H, tr[fi][3] + cp)
+                cl, _cm, q = cleaner.clean(fr[Y0:Y1, X0:X1], (tr[fi][0] - X0, tr[fi][1] - Y0, tr[fi][2] - X0, tr[fi][3] - Y0))
+                fr[Y0:Y1, X0:X1] = cl
+                quality.setdefault(i, []).append(q)
                 cv = d.get("canvas")
                 if cv is not None:
                     fx0, fy0, fx1, fy1 = d["full"]
@@ -544,15 +550,13 @@ def edit(src, out, items, progress=None, colors=None, objects=None):
                         la[:, :max(0, clip[0])] = 0
                         la[:, min(W, clip[1] + 2):] = 0
                     # the new text may be wider than the old one: paint it on the frame, over the cleaned area
-                    full_roi = fr.copy()
-                    full_roi[y0:y1, x0:x1] = roi
+                    full_roi = fr
                     rgb = np.array(layer.convert("RGB"), dtype=np.float32)[..., ::-1]
                     a = (la * alpha)[..., None]
                     fr = (full_roi * (1 - a) + rgb * a).astype(np.uint8)
-                else:
-                    fr[y0:y1, x0:x1] = roi
-                    continue
             wr.write(recolor(fr, colors) if colors else fr)
     finally:
         wr.close()
+    for i, qs in quality.items():
+        report[i]["clean_quality"] = round(float(np.median(qs)), 1)
     return report, ocr.name, objrep
