@@ -20,26 +20,30 @@ import cleaner
 import gemini
 
 FPS = 30
-Z_DEFAULT = {"text": 90, "button": 60, "logo": 50, "product": 50, "shape": 30, "decor": 20, "photo": 10}
+Z_DEFAULT = {"text": 90, "button": 60, "logo": 50, "product": 50, "person": 40, "shape": 30, "decor": 20, "photo": 10}
 KINDS = tuple(Z_DEFAULT)
 
 READ_SYSTEM = """You are a motion designer reading a finished graphic design (flyer, poster, social post, banner) that will be animated, exactly as designed.
 List its parts and plan the animation the client asked for. Reply JSON only:
 {"duration":8,"mood":"calm|energetic|bold","camera":{"move":"push|pull|pan_left|pan_right|none","amount":0.06},
- "elements":[{"id":"e1","kind":"text|logo|product|button|shape|decor|photo","label":"short name","text":"exact words for a text (same line breaks as separate elements), else empty",
+ "elements":[{"id":"e1","kind":"text|logo|person|product|button|shape|decor|photo","label":"short name","text":"exact words for a text (same line breaks as separate elements), else empty",
    "box_2d":[ymin,xmin,ymax,xmax],"z":90,
-   "in":"fade|slide_up|slide_down|slide_left|slide_right|pop|zoom_in|drop|wipe|spin_in|none","delay":0.4,"dur":0.7,
-   "idle":"none|float|pulse|sway|shine","out":"none|fade"}]}
+   "in":"fade|slide_up|slide_down|slide_left|slide_right|pop|zoom_in|drop|wipe|spin_in|slam|focus|none","split":"none|letters|words","delay":0.4,"dur":0.7,
+   "idle":"none|float|pulse|sway|shine|breathe","out":"none|fade"}]}
 Rules:
 - box_2d are integers 0-1000 (fractions of picture height and width): the tight box of the part, including its glow or shadow. One element per text LINE or block that is one style. Do not list the plain background.
-- kinds: text (any words), logo (brand mark), product (a product / person / main object picture), button (a shape that holds a text: list the shape as button, its words as their own text), shape (lines, bars, badges, frames), decor (small ornaments, stickers, icons), photo (a picture inside the design that is not the background).
+- ALWAYS list every person and every main subject as its own element (kind person or product), even when they are part of a photo or poster background: each one is animated on its own. Never leave people inside the background.
+- kinds: person (a person or a main photographed subject, tight box around the whole figure), text (any words), logo (brand mark), product (a product / person / main object picture), button (a shape that holds a text: list the shape as button, its words as their own text), shape (lines, bars, badges, frames), decor (small ornaments, stickers, icons), photo (a picture inside the design that is not the background).
 - z = front-to-back order, larger is in front. Text is in front of what it sits on.
 - Follow the client's prompt for style and timing. Build a story: background first, then the main picture or product, then the headline, then smaller texts, then the call-to-action last. Delays are in seconds from the start, the last part must be in by 70% of the duration.
 - Fit the animation to the design: bold headlines pop or slide, elegant thin texts fade or wipe, products zoom or drop, logos fade then shine, shapes wipe or slide. Do not use the same entrance for everything.
-- idle is what a part does after it arrived (subtle only): products float, buttons pulse, logos shine, most texts none."""
+- idle is what a part does after it arrived (subtle only): people and products breathe or float, buttons pulse, logos shine, most texts none.
+- People: use zoom_in, focus or fade (a small move only, they must not travel across the picture); they come before the headline. Give people idle breathe.
+- Texts: be bold and sharp. Big headlines: split letters with pop or slam (kinetic type) or words with slide_up. Script or thin texts: wipe or focus. Small lines: split words with fade or slide_up. Do not use plain fade for everything.
+- split is only for text: letters (each letter enters after the one before) or words."""
 
-EFFECTS_IN = {"fade", "slide_up", "slide_down", "slide_left", "slide_right", "pop", "zoom_in", "drop", "wipe", "spin_in", "none"}
-IDLES = {"none", "float", "pulse", "sway", "shine"}
+EFFECTS_IN = {"fade", "slide_up", "slide_down", "slide_left", "slide_right", "pop", "zoom_in", "drop", "wipe", "spin_in", "slam", "focus", "none"}
+IDLES = {"none", "float", "pulse", "sway", "shine", "breathe"}
 
 
 # ------------------------------------------------------------------ reading
@@ -140,6 +144,7 @@ def normalise(plan, W, H):
         els.append({"id": str(e.get("id") or f"e{i + 1}"), "kind": kind, "label": str(e.get("label") or e.get("text") or kind)[:40], "text": str(e.get("text") or ""),
                     "box": [x0, y0, x1, y1], "z": _num(e.get("z"), 0, 200, Z_DEFAULT[kind]), "in": ein if ein in EFFECTS_IN else "fade",
                     "delay": _num(e.get("delay"), 0, 30, 0.4 * i), "dur": _num(e.get("dur"), 0.15, 3, 0.7), "idle": idle if idle in IDLES else "none",
+                    "split": str(e.get("split", "none")).lower() if str(e.get("split", "none")).lower() in ("letters", "words") and kind == "text" else "none",
                     "out": "fade" if str(e.get("out")).lower() == "fade" else "none"})
     dur = _num(plan.get("duration"), 3, 30, 8)
     last = max([e["delay"] + e["dur"] for e in els] or [1])
@@ -151,6 +156,48 @@ def normalise(plan, W, H):
     mv = str(cam.get("move", "push")).lower()
     return {"duration": dur, "mood": str(plan.get("mood", "energetic")).lower(), "camera": {"move": mv if mv in ("push", "pull", "pan_left", "pan_right", "none") else "push",
             "amount": _num(cam.get("amount"), 0, 0.15, 0.05)}, "elements": els}
+
+
+def gemini_masks(img, elements):
+    """Real outlines of people and products from Gemini's segmentation. Returns {element id: full-frame uint8 mask}; empty when Gemini is not available."""
+    import base64
+    want = [e for e in elements if e["kind"] in ("person", "product")]
+    if not want:
+        return {}
+    H, W = img.shape[:2]
+    names = "; ".join(f"{e['label']} (box_2d {[int(e['box'][1] / H * 1000), int(e['box'][0] / W * 1000), int(e['box'][3] / H * 1000), int(e['box'][2] / W * 1000)]})" for e in want)
+    out = {}
+    try:
+        txt = gemini.generate("Give the segmentation masks for these objects of the picture: " + names + ". Output a JSON list where each entry contains the 2D bounding box in the key \"box_2d\", the segmentation mask in the key \"mask\", and the text label in the key \"label\". Cut the whole figure with its hair, hands and clothes, nothing of the background.",
+                              images=[(_jpeg(img), "image/jpeg")], json_mode=True, temperature=0.0, max_tokens=30000, rounds=1, timeout=120, deadline=240)
+        res = gemini.parse_json(txt)
+    except Exception as ex:  # noqa: BLE001
+        print("::warning::segmentation by Gemini failed:", str(ex)[:120])
+        return {}
+    for r in res if isinstance(res, list) else []:
+        try:
+            y0, x0, y1, x1 = [float(v) / 1000.0 for v in r["box_2d"]]
+            bx0, by0, bx1, by1 = int(x0 * W), int(y0 * H), int(x1 * W), int(y1 * H)
+            b64 = str(r["mask"]).split(",")[-1]
+            m = cv2.imdecode(np.frombuffer(base64.b64decode(b64), np.uint8), cv2.IMREAD_GRAYSCALE)
+            if m is None or bx1 - bx0 < 8 or by1 - by0 < 8:
+                continue
+            m = (cv2.resize(m, (bx1 - bx0, by1 - by0), interpolation=cv2.INTER_LINEAR) > 127).astype(np.uint8)
+            full = np.zeros((H, W), np.uint8)
+            full[by0:by1, bx0:bx1] = m
+            best, bi = 0.0, None
+            for e in want:
+                ex0, ey0, ex1, ey1 = e["box"]
+                iw, ih = min(bx1, ex1) - max(bx0, ex0), min(by1, ey1) - max(by0, ey0)
+                if iw > 0 and ih > 0:
+                    iou = iw * ih / ((bx1 - bx0) * (by1 - by0) + (ex1 - ex0) * (ey1 - ey0) - iw * ih)
+                    if iou > best:
+                        best, bi = iou, e
+            if bi is not None and best > 0.35 and bi["id"] not in out:
+                out[bi["id"]] = full
+        except Exception:  # noqa: BLE001
+            continue
+    return out
 
 
 # ------------------------------------------------------------------ splitting
@@ -196,7 +243,7 @@ def _outline(img, box):
     return full
 
 
-def lift(plate, e, holes):
+def lift(plate, e, holes, masks=None):
     """Takes the part out of the plate (in place). Returns the layer: premultiplied float32 BGRA sprite + origin, or None."""
     H, W = plate.shape[:2]
     x0, y0, x1, y1 = e["box"]
@@ -209,7 +256,7 @@ def lift(plate, e, holes):
         rx0, ry0, rx1, ry1 = max(0, bx0 - m), max(0, by0 - m), min(W, bx1 + m), min(H, by1 + m)
         roi = plate[ry0:ry1, rx0:rx1].copy()
         inner = (bx0 - rx0, by0 - ry0, bx1 - rx0, by1 - ry0)
-        clean, mask, q = cleaner.clean(roi, inner, margin=0.25)
+        clean, mask, q = cleaner.clean(roi, inner, margin=0.25, strokes=True)
         holes[ry0:ry1, rx0:rx1] |= (cv2.dilate(mask, np.ones((3, 3), np.uint8)) > 0).astype(np.uint8)
         d = np.linalg.norm(roi.astype(np.float32) - clean.astype(np.float32), axis=2)
         sel = d[mask > 0]
@@ -253,7 +300,16 @@ def lift(plate, e, holes):
         work = plate.copy()
         hm = cv2.dilate(holes, np.ones((3, 3), np.uint8))
         work = cv2.inpaint(work, (hm * 255).astype(np.uint8), 3, cv2.INPAINT_TELEA)
-    full = _outline(work, e["box"])
+    full = (masks or {}).get(e["id"])
+    if full is not None:
+        full = cv2.morphologyEx(full, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    else:
+        full = _outline(work, e["box"])
+    big = e["kind"] == "person"
+    if big and (masks or {}).get(e["id"]) is None:                    # no real outline of the person (Gemini mask missing): only a convincing cut is used, a box-shaped one is not
+        e["nomask"] = True
+        if full.sum() > 0.82 * max(1.0, (x1 - x0) * (y1 - y0)):
+            return None
     ys, xs = np.nonzero(full)
     if not len(xs):
         return None
@@ -261,9 +317,12 @@ def lift(plate, e, holes):
     m = int(max(ox1 - ox0, oy1 - oy0) * 0.25) + 12
     rx0, ry0, rx1, ry1 = max(0, ox0 - m), max(0, oy0 - m), min(W, ox1 + m), min(H, oy1 + m)
     roi = work[ry0:ry1, rx0:rx1].copy()
-    fm = cv2.dilate(full[ry0:ry1, rx0:rx1], np.ones((5, 5), np.uint8), iterations=2)
+    fm = cv2.dilate(full[ry0:ry1, rx0:rx1], np.ones((5, 5), np.uint8), iterations=3 if big else 2)
     inner = (ox0 - rx0, oy0 - ry0, ox1 - rx0, oy1 - ry0)
-    clean, mask, q = cleaner.clean(roi, inner, margin=0.1, force=fm)
+    if big:
+        clean, mask, q = cleaner.push_pull(roi, fm), fm, 0.0
+    else:
+        clean, mask, q = cleaner.clean(roi, inner, margin=0.1, force=fm)
     sel = cv2.dilate(mask, np.ones((9, 9), np.uint8)) > 0
     pv = plate[ry0:ry1, rx0:rx1]
     pv[sel] = clean[sel]
@@ -274,14 +333,45 @@ def lift(plate, e, holes):
     return {"P": np.dstack([F * a[..., None], a]).astype(np.float32), "ox": ox0, "oy": oy0, "q": q}
 
 
-def split(img, elements):
+def _pieces(L):
+    """A text cut into letters or words (at the empty columns between them); each piece enters after the one before it."""
+    e = L["e"]
+    P = L["P"]
+    h, w = P.shape[:2]
+    core = (P[..., 3] > 0.4).any(axis=0)
+    cols = np.nonzero(core)[0]
+    if len(cols) < 4:
+        return [L]
+    rows = np.nonzero((P[..., 3] > 0.4).any(axis=1))[0]
+    rh = max(8, rows.max() - rows.min() + 1)
+    gmin = 1 if e["split"] == "letters" else max(4, int(rh * 0.3))
+    cuts, start, prev = [], cols[0], cols[0]
+    for c in cols[1:]:
+        if c - prev - 1 >= gmin:
+            cuts.append((start, prev + 1))
+            start = c
+        prev = c
+    cuts.append((start, prev + 1))
+    if len(cuts) < 2 or len(cuts) > 40:
+        return [L]
+    bounds = [0] + [(cuts[i][1] + cuts[i + 1][0]) // 2 for i in range(len(cuts) - 1)] + [w]
+    stag = min(0.07 if e["split"] == "letters" else 0.16, 0.9 / len(cuts))
+    out = []
+    for i in range(len(cuts)):
+        c0, c1 = bounds[i], bounds[i + 1]
+        ee = dict(e, delay=e["delay"] + i * stag, dur=max(0.3, e["dur"] * 0.85), split="none")
+        out.append({"P": P[:, c0:c1].copy(), "ox": L["ox"] + c0, "oy": L["oy"], "q": L["q"], "e": ee})
+    return out
+
+
+def split(img, elements, masks=None):
     """(plate, layers) : layers cut from the front to the back; each layer gets the element's data."""
     plate = img.copy()
     holes = np.zeros(img.shape[:2], np.uint8)
     layers = []
     for e in sorted(elements, key=lambda x: -x["z"]):
         try:
-            L = lift(plate, e, holes)
+            L = lift(plate, e, holes, masks)
         except Exception as ex:  # noqa: BLE001
             print("::warning::part not lifted:", e["label"], str(ex)[:100])
             L = None
@@ -290,7 +380,7 @@ def split(img, elements):
             continue
         e["lifted"] = True
         L["e"] = e
-        layers.append(L)
+        layers.extend(_pieces(L) if e.get("split", "none") != "none" else [L])
     layers.sort(key=lambda L: L["e"]["z"])                         # back to front for drawing
     _sweep(plate, [L["e"]["box"] for L in layers])
     return plate, layers
@@ -343,9 +433,11 @@ def _bounce(p):
 
 def state(e, t, W, H):
     """Transform of one part at time t: dx, dy (original px), scale, rotation (deg), alpha, clip (0..1 of its width shown), shine (0..1 or -1)."""
-    s = {"dx": 0.0, "dy": 0.0, "sc": 1.0, "rot": 0.0, "a": 1.0, "clip": 1.0, "shine": -1.0}
+    s = {"dx": 0.0, "dy": 0.0, "sc": 1.0, "rot": 0.0, "a": 1.0, "clip": 1.0, "shine": -1.0, "blur": 0.0}
     p = (t - e["delay"]) / e["dur"]
-    if p <= 0 and e["in"] != "none":
+    if e["kind"] == "person":                                       # a person is on screen from the first frame (the picture behind is a soft wash); the entrance is a camera-like move
+        p = max(0.0, p)
+    if p <= 0 and e["in"] != "none" and e["kind"] != "person":
         s["a"] = 0.0
         return s
     p = min(1.0, max(0.0, p)) if e["in"] != "none" else 1.0
@@ -369,16 +461,23 @@ def state(e, t, W, H):
         s["a"], s["dy"] = min(1, p * 4), -0.5 * H * (1 - _bounce(p))
     elif k == "wipe":
         s["clip"] = _out_cubic(p)
+    elif k == "slam":
+        s["a"], s["sc"] = min(1, p * 5), 1 + 0.9 * (1 - _out_expo(p))
+    elif k == "focus":
+        s["a"], s["blur"] = min(1, p * 2.2), (0.0 if e.get("nomask") else 14.0 * (1 - _out_cubic(p)))
     elif k == "spin_in":
         s["a"], s["sc"], s["rot"] = min(1, p * 2.5), 0.5 + 0.5 * _out_back(p), -28 * (1 - _out_cubic(p))
-    if e["out"] == "fade":
-        pass
+    if e["kind"] == "person":
+        s["a"], s["clip"] = 1.0, 1.0
     if t > e["delay"] + e["dur"]:                                   # alive after arriving
         u = t - (e["delay"] + e["dur"])
         if e["idle"] == "float":
             s["dy"] += 0.008 * H * math.sin(u * 2.2)
         elif e["idle"] == "pulse":
             s["sc"] *= 1 + 0.03 * math.sin(u * 4.0)
+        elif e["idle"] == "breathe":
+            s["sc"] *= 1 + 0.012 * math.sin(u * 1.6)
+            s["dy"] += 0.004 * H * math.sin(u * 1.1)
         elif e["idle"] == "sway":
             s["rot"] += 1.6 * math.sin(u * 1.8)
         elif e["idle"] == "shine":
@@ -419,9 +518,12 @@ def _camera(plan_cam, t, T, W, H, S):
 def _sprite_for(L, st):
     """Sprite with the wipe and the shine applied (in sprite space), as premultiplied BGRA."""
     P = L["P"]
-    if st["clip"] >= 0.999 and st["shine"] < 0:
+    if st["clip"] >= 0.999 and st["shine"] < 0 and st.get("blur", 0) < 0.4:
         return P
     P = P.copy()
+    if st.get("blur", 0) >= 0.4:                                    # focus pull: from blurred to sharp
+        k = int(st["blur"] * 3) | 1
+        P = cv2.GaussianBlur(cv2.copyMakeBorder(P, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=0), (k, k), st["blur"])[20:-20, 20:-20]
     h, w = P.shape[:2]
     if st["clip"] < 0.999:
         xs = np.arange(w, dtype=np.float32)
@@ -475,7 +577,7 @@ def sound_items(plan, sfx):
             continue
         k = e["in"]
         name = {"slide_up": "whoosh", "slide_down": "whoosh", "slide_left": "whoosh", "slide_right": "whoosh", "pop": "pop", "zoom_in": "pop", "drop": "hit" if mood == "bold" else "pop",
-                "spin_in": "swoosh_up", "wipe": "swoosh_up", "fade": "shimmer" if mood == "calm" else None}.get(k)
+                "spin_in": "swoosh_up", "wipe": "swoosh_up", "slam": "hit" if mood == "bold" else "pop", "focus": "swoosh_up", "fade": "shimmer" if mood == "calm" else None}.get(k)
         if mood == "calm" and name in ("whoosh", "pop"):
             name = "shimmer"
         if name == "hit" and e["kind"] != "text":
@@ -513,7 +615,9 @@ def make(image_path, prompt, out_path, work, audio=None, progress=None, plan=Non
         raise RuntimeError("I could not find any parts (texts, logo, product, shapes) in this graphic to animate. Send the graphic as a File (not Photo) so the quality stays original, or a clearer copy.")
     if progress:
         progress("split", f"{len(plan['elements'])} parts")
-    plate, layers = split(img, plan["elements"])
+    import bgremove
+    masks = bgremove.subject_masks(img, [{"id": e["id"], "label": e["label"], "box": e["box"]} for e in plan["elements"] if e["kind"] in ("person", "product")])
+    plate, layers = split(img, plan["elements"], masks)
     if not layers:
         raise RuntimeError("I found the parts but could not lift any of them cleanly from the picture.")
     S = target_scale(W, H)
