@@ -295,6 +295,48 @@ def _edit_original(job, brief, store, tg, mon, work, items, cols=()):
     mon.finish(url, "; ".join(lines[1:3]))
 
 
+def _animate_wanted(brief):
+    """A prompt whose first word is ANIMATE asks to animate the graphic that was sent, exactly as it is."""
+    m = re.match(r"^\s*(?:/animate|animate)\b[:\-\s]*", str(brief.get("prompt", "")), re.I)
+    return m.end() if m else 0
+
+
+def _animate_job(job, brief, store, tg, mon, work, cut):
+    import animate
+    prompt = str(brief.get("prompt", ""))[cut:].strip()
+    imgs = [a for a in brief.get("assets", []) if str(a.get("path", "")).lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp"))]
+    if not imgs:
+        raise RuntimeError("Send the graphic first (as a File, not a Photo, for the best quality), then the prompt starting with the word ANIMATE.")
+    mon.stage("edit", "reading your graphic")
+    src = store.download(imgs[0]["path"], os.path.join(work, "graphic" + os.path.splitext(imgs[0]["path"])[1].lower()))
+    audio = None
+    for a in brief.get("assets", []):
+        if str(a.get("path", "")).lower().endswith((".mp3", ".wav", ".m4a", ".ogg", ".aac")):
+            audio = store.download(a["path"], os.path.join(work, "music" + os.path.splitext(a["path"])[1].lower()))
+            break
+    out = os.path.join(work, "final.mp4")
+    rep = animate.make(src, prompt, out, work, audio=audio, progress=lambda k, v: mon.stage("edit", f"{k}: {v}"))
+    mon.done_stage("edit", f"{sum(1 for e in rep['elements'] if e.get('lifted'))} parts animated ({rep['engine']})")
+    store.upload_file(f"motion/jobs/{job}/final.mp4", out, "video/mp4")
+    url = store.signed_url(f"motion/jobs/{job}/final.mp4")
+    lines = [f"✅ Your graphic is animated ({rep['size'][0]}x{rep['size'][1]}, {rep['duration']:.0f}s). Same design, every part lifted out of your picture as it is and moved; nothing redrawn."]
+    for e in sorted(rep["elements"], key=lambda x: x["delay"]):
+        if e.get("lifted"):
+            lines.append(f"• {e['label']}: {e['in'].replace('_', ' ')} at {e['delay']:.1f}s" + (f", then {e['idle']}" if e["idle"] != "none" else ""))
+    skipped = [e["label"] for e in rep["elements"] if not e.get("lifted")]
+    if skipped:
+        lines.append("⚠️ Left still (could not lift cleanly): " + ", ".join(skipped)[:200])
+    lines.append("Want changes? Send the graphic again with ANIMATE and say what to change (order, speed, style, camera, mood).")
+    if os.path.getsize(out) / 1e6 <= 48:
+        try:
+            tg.send_video(out, "\n".join(lines))
+        except Exception:  # noqa: BLE001
+            tg.send("\n".join(lines) + ("\nDownload: " + url if url else ""))
+    else:
+        tg.send("\n".join(lines) + f"\n\nToo big for Telegram. Download (7 days):\n{url}")
+    mon.finish(url, "; ".join(lines[1:3]))
+
+
 def main(job):
     store = Store()
     voice.wake()                       # wake the free voice server now, while the director works
@@ -345,6 +387,11 @@ def main(job):
     os.makedirs(adir, exist_ok=True)
     stage = "start"
     try:
+        _an = _animate_wanted(brief) if not brief.get("edit_of") else 0
+        if _an:
+            stage = "Animating your graphic"
+            _animate_job(job, brief, store, tg, mon, work, _an)
+            return
         _sw = _swap_items(brief) if not brief.get("edit_of") else None
         if _sw:
             stage = "Editing your video"
