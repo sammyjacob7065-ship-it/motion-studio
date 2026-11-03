@@ -215,24 +215,6 @@ def _save(url, dest_dir, name):
     return path
 
 
-def cutout(path):
-    """Removes the background (optional, installs rembg on first use). Returns new PNG path or None."""
-    try:
-        try:
-            from rembg import remove  # type: ignore
-        except ImportError:
-            subprocess.run(["pip", "install", "-q", "rembg", "onnxruntime"], check=True, timeout=900)
-            from rembg import remove  # type: ignore
-        out = os.path.splitext(path)[0] + "_cutout.png"
-        with open(path, "rb") as f:
-            data = remove(f.read())
-        with open(out, "wb") as f:
-            f.write(data)
-        return out
-    except Exception:  # noqa: BLE001
-        return None
-
-
 def describe_images(infos, paths, groq_chat):
     """Short description of each picture so the director knows what it is looking at (vision model, optional)."""
     from groq import parse_json
@@ -273,7 +255,7 @@ def describe_images(infos, paths, groq_chat):
             continue
 
 
-def cutout(path, out_path=None):
+def _cutout_plain(path, out_path=None):
     """Makes a product picture float: when the picture sits on a plain, even background (a studio shot, a white or light backdrop), that background is
     removed (flood-filled from the edges, so white parts INSIDE the product stay) and the product is saved as a transparent PNG with soft edges.
     Returns the new path, or None when the background is not plain enough (the original is then used as it is)."""
@@ -327,4 +309,18 @@ def cutout(path, out_path=None):
         return out
     except Exception as e:  # noqa: BLE001
         print("::warning::cut-out skipped:", str(e)[:120])
+        return None
+
+
+def cutout(path, out_path=None, subject=None):
+    """Background removal for the whole studio. A plain background is flood-filled (exact); a busy one goes to the remover department (Gemini segmentation, a trained model, edge finishing).
+    Returns the new transparent PNG path, or None when nothing convincing could be cut (the original is then used as it is)."""
+    p = _cutout_plain(path, out_path)
+    if p:
+        return p
+    try:
+        import bgremove
+        return bgremove.remove_file(path, out_path, subject=subject, allow_basic=False)
+    except Exception as e:  # noqa: BLE001
+        print("::warning::remover department failed:", str(e)[:120])
         return None
