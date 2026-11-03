@@ -6,6 +6,7 @@ from common import Cancelled
 STAGES = [
     ("brief", "📥", "Brief received"),
     ("assets", "🔍", "Checking your files"),
+    ("edit", "✂️", "Editing your video"),
     ("plan", "🧠", "Director is planning"),
     ("shots", "📸", "Making product shots"),
     ("stock", "🖼", "Getting pictures"),
@@ -56,7 +57,7 @@ class Monitor:
             pass
 
     def _line(self, key, mark, note=""):
-        e, t = LABEL[key]
+        e, t = LABEL.get(key, ("▶", key))                         # an unknown stage name never stops a job
         self.lines[key] = f"{mark} {e} {t}" + (f" — {note}" if note else "")
 
     def stage(self, key, note=""):
