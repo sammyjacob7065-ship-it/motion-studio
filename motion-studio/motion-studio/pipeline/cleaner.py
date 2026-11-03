@@ -45,7 +45,7 @@ def fit_surface(roi, ring):
     return fit, float(1.4826 * np.median(np.abs(res_ring - np.median(res_ring))) + np.median(res_ring))
 
 
-def clean(roi, inner, margin=0.55, grow=0.14):
+def clean(roi, inner, margin=0.55, grow=0.14, force=None):
     """roi: BGR uint8 region. inner: (x0,y0,x1,y1) the tight box of the old text inside the roi.
     Returns (clean roi uint8, mask uint8, quality) where quality is the residual of the background model in grey levels (small = a smooth background, rebuilt exactly)."""
     h, w = roi.shape[:2]
@@ -85,6 +85,8 @@ def clean(roi, inner, margin=0.55, grow=0.14):
     tail = cv2.dilate(mask, np.ones((6 * g + 1, 6 * g + 1), np.uint8)) & low
     mask = cv2.morphologyEx(mask | tail, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
     mask &= cz.astype(np.uint8)
+    if force is not None:                                      # the caller knows part of what must go (an object's outline): joined to the mask
+        mask |= (force > 0).astype(np.uint8)
     smooth = scale <= 11.0
     if smooth:
         # rebuilt from the model of the background, with the picture's own grain
@@ -93,11 +95,14 @@ def clean(roi, inner, margin=0.55, grow=0.14):
         noise = cv2.GaussianBlur(np.random.default_rng(7).normal(0, grain * 1.3, f.shape).astype(np.float32), (0, 0), 0.6)
         # structure the model cannot hold (the edge of a circle, a light streak) is carried over from the picture around: inpaint the difference, not the picture
         r = cv2.GaussianBlur(f, (0, 0), 1.0) - fit
-        big0 = cv2.dilate(mask, np.ones((3, 3), np.uint8))
+        bad = ((res > 60) & ring).astype(np.uint8)                           # other objects in the ring (a logo, a picture): not structure of the background, never carried over
+        big0 = cv2.dilate(mask | cv2.dilate(bad, np.ones((5, 5), np.uint8)), np.ones((3, 3), np.uint8))
         r16 = np.clip(r * 4 + 128, 0, 255).astype(np.uint8)
         ri = cv2.inpaint(r16, big0 * 255, 7, cv2.INPAINT_NS).astype(np.float32)
         ri = (ri - 128) / 4.0
         ri = cv2.GaussianBlur(ri, (0, 0), 1.5)
+        if float(np.std(cv2.GaussianBlur(r, (0, 0), 2.0)[ring])) < 2.5:           # the background is explained by the model (no structure to carry over): no streaks from noise
+            ri = np.zeros_like(ri)
         rebuilt = np.clip(fit + ri + noise, 0, 255)
         a = cv2.GaussianBlur(mask.astype(np.float32), (0, 0), max(1.0, g * 0.35))[..., None]
         a = np.clip(a * 1.5, 0, 1) * (cz[..., None])
