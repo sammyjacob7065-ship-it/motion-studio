@@ -19,7 +19,6 @@ import director  # noqa: E402
 import groq  # noqa: E402
 import imagegen  # noqa: E402
 import openimages  # noqa: E402
-import origedit  # noqa: E402
 import productshots  # noqa: E402
 import mix  # noqa: E402
 import pronounce  # noqa: E402
@@ -202,6 +201,7 @@ def _swap_items(brief):
     ag = ref.get("agreed") or {}
     if str(ag.get("mode", "")).lower() not in ("swap", "rebrand"):
         return None
+    import origedit                                           # loaded only here: a normal job never needs the video-edit packages
     items, cols = origedit.items_from(ag), origedit.colors_from(ag)
     if str(ag.get("mode", "")).lower() == "rebrand" or items or cols:
         return items, cols                                    # a rebrand always edits the client's video (logos and products are found inside)
@@ -231,6 +231,7 @@ def _client_assets(brief, store, work):
 def _edit_original(job, brief, store, tg, mon, work, items, cols=()):
     """Edits the original video of a swap or a rebrand: same pictures, motion and music; the named texts, the brand colours, the brand's logo and its product are swapped for the client's. Delivers it like any other job."""
     import objswap
+    import origedit
     mon.stage("edit", f"{len(items)} texts" + (f", {len(cols)} colours" if cols else ""))
     src = store.download(f"motion/{brief['chat_id']}/reference/ref.mp4", os.path.join(work, "original.mp4"))
     out = os.path.join(work, "final.mp4")
