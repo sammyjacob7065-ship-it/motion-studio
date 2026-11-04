@@ -10,6 +10,7 @@ from common import S, env
 BASE = "https://generativelanguage.googleapis.com/v1beta/models/"
 DEFAULT_MODELS = "gemini-3.8-flash,gemini-3.7-flash,gemini-2.5-flash,gemini-flash-lite-latest"
 _K = {"i": 0}
+LAST = {"finish": ""}                                       # why the last answer ended (STOP, MAX_TOKENS ...)
 
 
 def keys():
@@ -70,6 +71,11 @@ def models():
     return out
 
 
+def _finish(resp):
+    c = (resp.get("candidates") or [{}])[0]
+    return str(c.get("finishReason") or "")
+
+
 def _text(resp):
     out = []
     for c in (resp.get("candidates") or [])[:1]:
@@ -79,7 +85,7 @@ def _text(resp):
     return "".join(out).strip()
 
 
-def generate(prompt, system=None, json_mode=True, video=None, video_mime="video/mp4", temperature=0.3, max_tokens=32000, rounds=3, images=None):
+def generate(prompt, system=None, json_mode=True, video=None, video_mime="video/mp4", temperature=0.3, max_tokens=32000, rounds=3, images=None, timeout=300, deadline=None):
     """Returns the answer text. video = bytes of a video (up to about 20 MB) shown to the model together with the prompt."""
     ks = keys()
     if not ks:
@@ -94,19 +100,41 @@ def generate(prompt, system=None, json_mode=True, video=None, video_mime="video/
         body["generationConfig"]["responseMimeType"] = "application/json"
     if system:
         body["systemInstruction"] = {"parts": [{"text": system}]}
+    # A thinking model spends part of the answer budget on its own thinking: with a long JSON the answer was then cut off in the middle (the log showed the text stopping after a comma).
+    # The thinking is limited so the whole answer fits, and an answer that still ends by the token limit is asked again with a bigger budget and almost no thinking.
+    think = int(env("GEMINI_THINKING", "1024") or 0)
+    if json_mode and think >= 0:
+        body["generationConfig"]["thinkingConfig"] = {"thinkingBudget": think}
+    cut = False
     last = ""
+    t0 = time.time()
     for rnd in range(rounds):
         for m in models():
-            for attempt in range(2):
+            for attempt in range(4):                           # (a setting dropped or a bigger limit asked for is one more try, not a lost one)
+                if deadline and time.time() - t0 > deadline:
+                    raise RuntimeError("Gemini took too long: " + (last or "no answer"))
                 key = ks[_K["i"] % len(ks)]
                 try:
-                    r = S.post(BASE + m + ":generateContent", headers={"x-goog-api-key": key, "Content-Type": "application/json"}, data=json.dumps(body), timeout=300)
+                    r = S.post(BASE + m + ":generateContent", headers={"x-goog-api-key": key, "Content-Type": "application/json"}, data=json.dumps(body), timeout=timeout)
                 except Exception as e:  # noqa: BLE001
                     last = str(e)[:150]
                     time.sleep(3)
                     continue
+                if r.status_code == 400 and "thinking" in r.text.lower() and "thinkingConfig" in body["generationConfig"]:
+                    body["generationConfig"].pop("thinkingConfig", None)       # this model has no thinking setting: asked again without it
+                    last = f"{m}: no thinking setting"
+                    continue
                 if r.status_code == 200:
-                    t = _text(r.json())
+                    rj = r.json()
+                    t = _text(rj)
+                    LAST["finish"] = _finish(rj)
+                    if t and LAST["finish"] == "MAX_TOKENS" and not cut:
+                        cut = True                                             # the answer was cut off by the token limit: once more with a bigger limit and nearly no thinking
+                        body["generationConfig"]["maxOutputTokens"] = 65000
+                        if json_mode:
+                            body["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 256}
+                        print(f"::warning::{m}: the answer was cut off by the token limit, asking again with a bigger limit")
+                        continue
                     if t:
                         return t
                     last = "empty answer"
