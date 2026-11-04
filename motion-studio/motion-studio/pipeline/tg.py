@@ -1,5 +1,6 @@
 """Telegram helpers (the Motion Studio bot)."""
 import os
+import time
 from common import S, env, retry
 
 
@@ -10,15 +11,25 @@ class Telegram:
         self.base = f"https://api.telegram.org/bot{self.token}"
 
     def send(self, text):
-        r = S.post(self.base + "/sendMessage", json={"chat_id": self.chat, "text": text[:4000], "disable_web_page_preview": True}, timeout=30)
-        try:
-            return r.json().get("result", {}).get("message_id")
-        except Exception:  # noqa: BLE001
-            return None
+        """Sends a message; a slow Telegram is tried again 3 times and never raises (a message that cannot be delivered must not hide the real error behind it)."""
+        for k in range(3):
+            try:
+                r = S.post(self.base + "/sendMessage", json={"chat_id": self.chat, "text": text[:4000], "disable_web_page_preview": True}, timeout=30)
+                try:
+                    return r.json().get("result", {}).get("message_id")
+                except Exception:  # noqa: BLE001
+                    return None
+            except Exception as e:  # noqa: BLE001
+                print("::warning::Telegram message not delivered (try %d): %s" % (k + 1, str(e)[:100]))
+                time.sleep(2 + 3 * k)
+        return None
 
     def edit(self, message_id, text):
-        r = S.post(self.base + "/editMessageText", json={"chat_id": self.chat, "message_id": message_id, "text": text[:4000], "disable_web_page_preview": True}, timeout=30)
-        return r.status_code == 200
+        try:
+            r = S.post(self.base + "/editMessageText", json={"chat_id": self.chat, "message_id": message_id, "text": text[:4000], "disable_web_page_preview": True}, timeout=30)
+            return r.status_code == 200
+        except Exception:  # noqa: BLE001
+            return False
 
     def send_video(self, path, caption=""):
         def go():
