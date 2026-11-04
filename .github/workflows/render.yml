@@ -42,7 +42,7 @@ jobs:
           sudo apt-get install -y libasound2t64 || sudo apt-get install -y libasound2
 
       - name: Python packages
-        run: pip install requests pillow numpy opencv-contrib-python-headless
+        run: pip install requests pillow numpy opencv-contrib-python-headless json-repair
 
       - name: Better text reader (optional)
         run: pip install rapidocr-onnxruntime || true
