@@ -2,3 +2,4 @@ requests>=2.31
 pillow>=10.0
 numpy>=1.26
 opencv-contrib-python-headless>=4.9
+json-repair>=0.30
