@@ -528,48 +528,186 @@ def repair(prev_tl, prev_audio, problems, original_user):
     return _split(groq.parse_json(ans))
 
 
+PATCH_RULES = (
+    "RULES FOR THIS EDIT:\n"
+    "- Change ONLY what the requests ask. Everything else stays exactly as in the timeline above.\n"
+    "- Do NOT rewrite the timeline. Reply with a SHORT list of operations (a patch) that the studio applies to it:\n"
+    '  {"op":"set","id":"layer id","path":"props.size","value":120}   change one field of a layer; path is dotted (start, end, x, y, z, enter, exit, props.text, props.size, anim.opacity, props.points.0 ...); value may be a number, text, list or object\n'
+    '  {"op":"add","layer":{a complete new layer with a unique id}}\n'
+    '  {"op":"remove","id":"layer id"}\n'
+    '  {"op":"timeline_set","path":"duration","value":14}   a field of the timeline itself (duration, camera, background.colors, palette.accent ...)\n'
+    '  {"op":"audio_add","item":{"role":"sfx","sfx":"pop","start":2.0,"volume":0.5}}   {"op":"audio_remove","index":3}   {"op":"audio_set","index":2,"path":"start","value":3.1}\n'
+    "- Keep the voice-over timing, captions and the video length unless a request says otherwise.\n"
+    "- If a request needs a NEW picture (for example: show a modern kitchen), list it in new_pictures with a file name newpic1.jpg, newpic2.jpg ... and a full image prompt "
+    "(one sentence: subject, place, light, camera angle, photorealistic, no text), and use that file name in an image layer (set the old picture layer's props.asset to it, same start, end and size).\n"
+    "- A request about a time (for example: the price comes late) means move that layer's start/end (and its sound with audio_set); keep its length.\n"
+    '- Reply with JSON only, short: {"ops":[...],"new_pictures":[{"asset":"newpic1.jpg","prompt":"..."}],"changed":"one short plain sentence per request saying what you did"}'
+)
+
+
+def _set_path(obj, path, value):
+    """Sets obj['a']['b'][0]['c'] = value for the path 'a.b.0.c'; missing dicts are made. Returns True when set."""
+    parts = [p for p in str(path).split(".") if p != ""]
+    if not parts:
+        return False
+    cur = obj
+    for i, p in enumerate(parts):
+        last = i == len(parts) - 1
+        nxt = parts[i + 1] if not last else None
+        if isinstance(cur, list):
+            if not p.lstrip("-").isdigit() or not (-len(cur) <= int(p) < len(cur)):
+                return False
+            k = int(p)
+            if last:
+                cur[k] = value
+                return True
+            cur = cur[k]
+        elif isinstance(cur, dict):
+            if last:
+                cur[p] = value
+                return True
+            if not isinstance(cur.get(p), (dict, list)):
+                cur[p] = [] if (nxt and nxt.isdigit()) else {}
+            cur = cur[p]
+        else:
+            return False
+    return False
+
+
+def apply_patch(prev_tl, prev_audio, ops):
+    """Applies the edit operations to a copy of the timeline and audio. Returns (timeline, audio, applied count, notes about skipped operations)."""
+    import copy
+    tl, audio = copy.deepcopy(prev_tl), copy.deepcopy(prev_audio or [])
+    layers = tl.setdefault("layers", [])
+    byid = lambda i: next((l for l in layers if str(l.get("id")) == str(i)), None)  # noqa: E731
+    done, skipped = 0, []
+    for op in ops or []:
+        try:
+            k = str(op.get("op", "")).lower()
+            if k == "set":
+                l = byid(op.get("id"))
+                if l is None:
+                    skipped.append(f"no layer '{op.get('id')}'")
+                elif _set_path(l, op.get("path"), op.get("value")):
+                    done += 1
+                else:
+                    skipped.append(f"could not set {op.get('id')}.{op.get('path')}")
+            elif k == "add":
+                l = op.get("layer")
+                if isinstance(l, dict) and l.get("type"):
+                    base = str(l.get("id") or l["type"])
+                    while byid(base):
+                        base += "_"
+                    l["id"] = base
+                    layers.append(l)
+                    done += 1
+                else:
+                    skipped.append("a layer to add was not complete")
+            elif k == "remove":
+                l = byid(op.get("id"))
+                if l is None:
+                    skipped.append(f"no layer '{op.get('id')}' to remove")
+                else:
+                    layers.remove(l)
+                    done += 1
+            elif k == "timeline_set":
+                if _set_path(tl, op.get("path"), op.get("value")):
+                    done += 1
+                else:
+                    skipped.append(f"could not set timeline.{op.get('path')}")
+            elif k == "audio_add":
+                if isinstance(op.get("item"), dict) and op["item"].get("role"):
+                    audio.append(op["item"])
+                    done += 1
+            elif k == "audio_remove":
+                i = int(op.get("index"))
+                if 0 <= i < len(audio):
+                    audio.pop(i)
+                    done += 1
+            elif k == "audio_set":
+                i = int(op.get("index"))
+                if 0 <= i < len(audio) and _set_path(audio[i], op.get("path"), op.get("value")):
+                    done += 1
+                else:
+                    skipped.append(f"could not set audio {op.get('index')}")
+            else:
+                skipped.append(f"unknown operation '{k}'")
+        except Exception as e:  # noqa: BLE001
+            skipped.append(f"an operation failed ({str(e)[:60]})")
+    return tl, audio, done, skipped
+
+
 def edit(prev_tl, prev_audio, notes, registry, plan_json, brief_text, size, sfx_names):
     """The edit department: changes ONLY what the client's edit notes ask for in the finished timeline, keeps everything else exactly.
-    Uses Gemini (big answers) when its key is set, otherwise the Groq director. Returns (timeline, audio, new_pictures, what_changed)."""
+    The model answers with a SHORT list of operations (a patch) that is applied to the saved timeline: a long answer with the whole timeline is where models break the JSON,
+    a short one almost never does. If the patch cannot be used, the old way (the whole timeline back) is tried. Uses Gemini when its key is set, otherwise the Groq director.
+    Returns (timeline, audio, new_pictures, what_changed)."""
     import gemini
     W, H = size
-    user = (
+    head = (
         f"ORIGINAL CLIENT BRIEF (for context):\n<<<\n{str(brief_text)[:6000]}\n>>>\n\n"
         f"CANVAS: {W}x{H} ({plan_json.get('aspect', '9:16')}), 30 fps\n\n"
         f"ASSETS (use these exact file names):\n{asset_table(registry)}\n\n"
         f"SOUND EFFECTS AVAILABLE: {', '.join(sfx_names)}\n\n"
         f"THE FINISHED VIDEO AS A TIMELINE (JSON):\n{json.dumps({'timeline': prev_tl, 'audio': prev_audio}, separators=(',', ':'))}\n\n"
         "EDIT REQUESTS FROM THE CLIENT (do exactly these, in order):\n" + "\n".join(f"{i + 1}. {n}" for i, n in enumerate(notes)) + "\n\n"
+    )
+    user = head + PATCH_RULES
+    full_user = head + (
         "RULES FOR THIS EDIT:\n"
         "- Change ONLY what the requests ask. Every other layer keeps its id, start, end, position, size, effects and timing exactly as in the timeline above.\n"
         "- Keep the voice-over timing, captions and the video length unless a request says otherwise.\n"
-        "- If a request needs a NEW picture (for example: show a modern kitchen), list it in new_pictures with a file name newpic1.jpg, newpic2.jpg ... and a full image prompt "
-        "(one sentence: subject, place, light, camera angle, photorealistic, no text), and use that file name in the image layer that replaces the old picture (same start, end and size).\n"
-        "- A request about a time (for example: the price comes late) means move that layer's start/end and its sound; keep its length.\n"
+        "- If a request needs a NEW picture, list it in new_pictures with a file name newpic1.jpg, newpic2.jpg ... and a full image prompt, and use that file name in the image layer that replaces the old picture (same start, end and size).\n"
         '- Reply with JSON only: {"timeline": {the FULL timeline with the changes}, "audio": [the FULL audio list with the changes], "new_pictures": [{"asset":"newpic1.jpg","prompt":"..."}], "changed": "one short plain sentence per request saying what you did"}'
     )
-    ans, why = None, ""
+
+    def result_from_patch(ans):
+        ops = ans.get("ops") if isinstance(ans, dict) else None
+        if not isinstance(ops, list) or not ops:
+            return None
+        tl, audio, done, skipped = apply_patch(prev_tl, prev_audio, ops)
+        if not done:
+            return None
+        pics = [x for x in (ans.get("new_pictures") or []) if isinstance(x, dict) and x.get("asset") and x.get("prompt")][:6]
+        ch = str(ans.get("changed") or "")
+        if skipped:
+            print("::warning::edit operations skipped:", "; ".join(skipped)[:300])
+        return tl, audio, pics, ch[:600]
+
+    why = ""
     if gemini.available():
         ask = user
         for attempt in range(3):                               # an answer with a broken comma is asked for again, not given up on
             try:
                 ans = gemini.parse_json(gemini.generate(ask, system=system_prompt(example=False), temperature=0.2 if attempt == 0 else 0.0))
-                break
+                got = result_from_patch(ans)
+                if got:
+                    return got
+                why = "the answer had no usable operations"
+                ask = user + "\n\nIMPORTANT: your previous answer had no usable operations. Reply with the list of operations (ops) exactly as described."
             except Exception as e:  # noqa: BLE001
                 why = str(e)[:150]
                 print(f"::warning::Gemini edit attempt {attempt + 1} failed:", why)
                 if "JSON" not in why and "Expecting" not in why and "delimiter" not in why and "no JSON" not in why:
                     break
-                ask = user + f"\n\nIMPORTANT: your previous answer was NOT valid JSON ({why}). Answer again with the complete answer as STRICTLY valid JSON: double quotes, commas between all items, no comments, no trailing commas, nothing outside the JSON."
-    if ans is None:                                            # backup: the Groq director
-        if est_tokens(system_prompt(False), user) > int(env("SMALL_REQUEST", str(SMALL_REQUEST))) + 1500:
-            raise RuntimeError("The edit is too big for the free Groq plan" + (f" and Gemini failed ({why})" if why else " (no Gemini key set)") + ". Try /resume in a few minutes.")
-        ans = groq.parse_json(groq.chat([{"role": "system", "content": system_prompt(False)}, {"role": "user", "content": user}], temperature=0.2, max_tokens=14000, reasoning="high"))
-    tl = ans.get("timeline")
-    if not isinstance(tl, dict) or not tl.get("layers"):
-        raise RuntimeError("The edit answer had no timeline.")
-    pics = [x for x in (ans.get("new_pictures") or []) if isinstance(x, dict) and x.get("asset") and x.get("prompt")][:6]
-    return tl, ans.get("audio") if isinstance(ans.get("audio"), list) else prev_audio, pics, str(ans.get("changed") or "")[:600]
+                ask = user + f"\n\nIMPORTANT: your previous answer was NOT valid JSON ({why}). Answer again as STRICTLY valid JSON: double quotes, commas between all items, no comments, no trailing commas, nothing outside the JSON."
+        try:                                                    # the old way: the whole timeline back
+            ans = gemini.parse_json(gemini.generate(full_user, system=system_prompt(example=False), temperature=0.0))
+            tl = ans.get("timeline")
+            if isinstance(tl, dict) and tl.get("layers"):
+                pics = [x for x in (ans.get("new_pictures") or []) if isinstance(x, dict) and x.get("asset") and x.get("prompt")][:6]
+                return tl, ans.get("audio") if isinstance(ans.get("audio"), list) else prev_audio, pics, str(ans.get("changed") or "")[:600]
+        except Exception as e:  # noqa: BLE001
+            why = str(e)[:150]
+            print("::warning::Gemini whole-timeline edit failed:", why)
+    # backup: the Groq director (it only has to write the short patch)
+    if est_tokens(system_prompt(False), user) > int(env("SMALL_REQUEST", str(SMALL_REQUEST))) + 1500:
+        raise RuntimeError("The edit is too big for the free Groq plan" + (f" and Gemini failed ({why})" if why else " (no Gemini key set)") + ". Try /resume in a few minutes.")
+    ans = groq.parse_json(groq.chat([{"role": "system", "content": system_prompt(False)}, {"role": "user", "content": user}], temperature=0.2, max_tokens=6000, reasoning="high"))
+    got = result_from_patch(ans)
+    if not got:
+        raise RuntimeError("The edit answer had no usable changes. Say it again in other words, with the exact text or the second where it should change.")
+    return got
 
 
 def critique(images_b64, requirements, times):
