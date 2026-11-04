@@ -10,6 +10,7 @@ import math
 import re
 
 import timeline as T
+import motion
 
 STOP = set("a an the and or to of in on at for from with is are was be your you our my it this that now wait every do not no we i me so as by up us can all".split())
 ONES = "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen".split()
@@ -555,8 +556,8 @@ def polish(tl):
     trans = [l for l in layers if l["type"] == "transition"]
     n = 0
     for p in pics[1:]:
-        if any(abs(((t["start"] + t["end"]) / 2) - p["start"]) < 0.5 for t in trans):
-            continue
+        if p.get("tx") or any(abs(((t["start"] + t["end"]) / 2) - p["start"]) < 0.5 for t in trans):
+            continue                                   # a transition is already there (the script's, or the motion department's)
         n += 1
         layers.append({"id": f"auto_flash{n}", "type": "transition", "start": round(max(0.0, p["start"] - 0.12), 3), "end": round(min(dur, p["start"] + 0.28), 3), "x": W / 2, "y": H / 2, "z": 95,
                        "parallax": 0, "enter": None, "exit": None, "anim": {}, "props": {"kind": "flash", "color": "#ffffff", "intensity": 0.5}})
@@ -663,6 +664,11 @@ def finalize(tl, audio, words, voice_start, assets, beat_info=None, trim=True):
             lines = []
             if _leave_with_picture(tl["layers"], tl["width"], tl["duration"]):
                 lines.append("graphics now leave with their picture")
+        try:
+            tl, mlines = motion.apply(tl, audio, assets)
+            lines.extend(mlines)
+        except Exception as e:  # noqa: BLE001
+            print("motion department skipped:", e)
         tl, added = polish(tl)
         if added:
             lines.append("added: " + ", ".join(added))
