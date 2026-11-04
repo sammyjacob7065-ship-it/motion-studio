@@ -18,6 +18,7 @@ import checker  # noqa: E402
 import director  # noqa: E402
 import groq  # noqa: E402
 import imagegen  # noqa: E402
+import motion  # noqa: E402
 import openimages  # noqa: E402
 import productshots  # noqa: E402
 import mix  # noqa: E402
@@ -379,6 +380,7 @@ def main(job):
     if brief.get("edit_of") and not any(edit_notes):
         edit_notes = ["Change nothing in the video."]          # a watermark-only edit still counts as an edit (nothing else is touched)
     edit_notes = [n for n in edit_notes if n]
+    _style = motion.set_style(str(brief.get("prompt", "")))               # the motion style: from a line "STYLE: ..." in the prompt, or from the words of the brief
     checker.LAND_SOUND["name"] = "hit" if re.search(r"\bhit\b", str(brief.get("prompt", "")), re.I) else "sparkle"     # a hit only when the script asks for one
     mon = Monitor(store, tg, job)
     work = os.path.abspath(os.path.join("work", job))
@@ -865,7 +867,7 @@ def main(job):
             tl, warns = _normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
             resumed.append("timeline")
         else:
-            (raw_tl, raw_audio, dnotes), user_msg = director.timeline(brief["prompt"], plan, registry, words, T0, size, mix.SFX_NAMES, min_duration=min_dur, extra=extra)
+            (raw_tl, raw_audio, dnotes), user_msg = director.timeline(brief["prompt"], plan, registry, words, T0, size, mix.SFX_NAMES, min_duration=min_dur, extra=(extra or "") + motion.style_note())
             raw_tl.setdefault("aspect", plan.get("aspect", "9:16"))
             tl, warns = _normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
             problems = warns + T.check_layout(tl, registry)
