@@ -874,7 +874,11 @@ def main(job):
             for _ in range(2):
                 if not problems:
                     break
-                raw_tl, raw_audio, dn2 = director.repair(raw_tl, raw_audio, problems, user_msg)
+                try:
+                    raw_tl, raw_audio, dn2 = director.repair(raw_tl, raw_audio, problems, user_msg)
+                except Exception as e_:  # noqa: BLE001                  # a fix round that cannot be answered must not end the job: the timeline as it is already plays
+                    print("::warning::fix round skipped (the director could not answer):", str(e_)[:160])
+                    break
                 raw_tl.setdefault("aspect", plan.get("aspect", "9:16"))
                 tl, warns = _normalize(raw_tl, registry, voice_len=(VOICE_START + voice_len) if voice_path else None)
                 problems = warns + T.check_layout(tl, registry)
