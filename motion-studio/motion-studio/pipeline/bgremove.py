@@ -62,9 +62,12 @@ def gemini_masks(img, subjects):
             parts.append(name)
     out = [None] * len(subjects)
     try:
-        txt = gemini.generate("Give the segmentation masks for these objects of the picture: " + "; ".join(parts) + ". Output a JSON list where each entry contains the 2D bounding box in the key \"box_2d\", "
-                              "the segmentation mask in the key \"mask\", and the text label in the key \"label\". Cut the whole subject with its hair, hands, clothes and everything it holds, nothing of the background.",
-                              images=[(_jpeg(img), "image/jpeg")], json_mode=True, temperature=0.0, max_tokens=30000, rounds=1, timeout=120, deadline=240)
+        ask = ("Give the segmentation masks for these objects of the picture: " + "; ".join(parts) + ". Output a JSON list where each entry contains the 2D bounding box in the key \"box_2d\", "
+               "the segmentation mask in the key \"mask\", and the text label in the key \"label\". Cut the whole subject with its hair, hands, clothes and everything it holds, nothing of the background.")
+        try:
+            txt = gemini.generate(ask, images=[(_jpeg(img), "image/jpeg")], json_mode=True, temperature=0.0, max_tokens=30000, rounds=1, timeout=120, deadline=240)
+        except TypeError:                                         # an older gemini.py without the time limits
+            txt = gemini.generate(ask, images=[(_jpeg(img), "image/jpeg")], json_mode=True, temperature=0.0, max_tokens=30000, rounds=1)
         res = gemini.parse_json(txt)
     except Exception as e:  # noqa: BLE001
         print("::warning::segmentation by Gemini failed:", str(e)[:120])
