@@ -68,3 +68,10 @@ Test it with a hand-written timeline before the director is allowed to use it.
 - Sound effects are synthesized (clean but simple). Music only if the client supplies a file.
 - Editing by chat ("make the glow stronger") is not built yet. Each job saves its `timeline.json` in Supabase, which is what that feature will edit.
 - Remotion's licence is free for individuals and small teams; check remotion.dev/license if you grow.
+
+## 3D department: depth parallax, turnable 3D objects, one-photo ads (v2)
+- **depth** layer: one flat picture becomes a 3D scene. The studio cuts it into depth slices (subject nearest) and the camera orbits / pushes / drifts through them (`pipeline/depth3d.py`, `engine/src/blocks/Depth.tsx`). Set the repository variable `DEPTH_AI` to `1` to use a real depth model (transformers, installed in the workflow); without it the subject cut-out + ground-plane rule is used. A picture with no separable subject stays one slice (plain camera move) and says so in the notes.
+- **solid3d** layer: a cut-out product becomes a real turnable object. `mode` `cylinder` (bottle, can, jar) or `slab` (phone, box, book, shoe), `spin` / `swing` / own `rotateY` tracks, moving highlight, real rim thickness, plain back unless the client sent one (`engine/src/blocks/Solid3D.tsx`).
+- **One-photo ad** (`pipeline/creative.py`): one or two pictures and a short wish ("make a 30 second ad") and the creative director writes the whole ad (idea, exact voice-over, beats with techniques, colours, sound, end card) before the normal director builds it. It never touches a written script (scene lines, VOICE-OVER, or a first line `CREATIVE: off`). Force it with a line `CREATIVE: on`. Switch it off for a run with the variable `CREATIVE_AI=0`.
+- Tests: `python tests/test_depth3d.py` (no internet or keys needed).
+- Honest limits: a flat photo has no information behind the subject, so big camera moves reveal painted (guessed) background; keep `amount` under 1.6. A real 360 turn of a product from one photo shows a plain back, not the real back; send a back picture (`back`) for that. Ads are capped at 120 s.

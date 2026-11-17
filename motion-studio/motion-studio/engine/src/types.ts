@@ -7,7 +7,7 @@ export type EnterExit = { preset?: string; dur?: number; ease?: string; delay?: 
 
 export type Layer = {
   id: string;
-  type: 'image' | 'video' | 'text' | 'shape' | 'icon' | 'line' | 'particles' | 'counter' | 'captions' | 'transition' | 'magic' | 'group';
+  type: 'image' | 'video' | 'text' | 'shape' | 'icon' | 'line' | 'particles' | 'counter' | 'captions' | 'transition' | 'magic' | 'group' | 'depth' | 'solid3d';
   start: number;
   end: number;
   x?: number; y?: number;

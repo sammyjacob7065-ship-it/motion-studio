@@ -8,7 +8,7 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "pipeline"))
-os.environ.update({"SUPABASE_URL": "https://x.supabase.co", "SUPABASE_SERVICE_KEY": "k", "GROQ_API_KEY": "g", "MOTION_TG_TOKEN": "t", "REVIEW": "1"})
+os.environ.update({"SUPABASE_URL": "https://x.supabase.co", "SUPABASE_SERVICE_KEY": "k", "GROQ_API_KEY": "g", "MOTION_TG_TOKEN": "t", "REVIEW": "1", "CREATIVE_AI": "0"})
 os.chdir(tempfile.mkdtemp())
 
 import run  # noqa: E402

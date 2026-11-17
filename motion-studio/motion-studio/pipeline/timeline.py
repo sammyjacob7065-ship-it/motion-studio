@@ -8,7 +8,7 @@ import copy
 import math
 import re
 
-ALLOWED_TYPES = {"image", "video", "text", "shape", "icon", "line", "particles", "counter", "captions", "transition", "magic", "group"}
+ALLOWED_TYPES = {"image", "video", "text", "shape", "icon", "line", "particles", "counter", "captions", "transition", "magic", "group", "depth", "solid3d"}
 EASES = {"linear", "in", "out", "inOut", "inQuad", "outQuad", "inOutQuad", "outQuart", "inOutQuart", "outExpo", "inExpo",
          "inOutExpo", "outBack", "inBack", "outElastic", "spring", "outBounce", "inBounce"}
 PRESETS = {"none", "fade", "slideUp", "slideDown", "slideLeft", "slideRight", "scaleIn", "zoomIn", "pop", "blurIn", "wipe",
@@ -228,6 +228,21 @@ def normalize(tl, assets, voice_len=None, tail=1.2):
                     if est <= maxw or props["size"] <= 28:
                         break
                     props["size"] = round(props["size"] * 0.92)
+        elif typ in ("depth", "solid3d"):                           # 3D department (depth3d.py makes the slices / the back picture after this check)
+            a = find_asset(props.get("asset"))
+            if not a or assets[a].get("kind") != "image":
+                warn.append(f"layer '{lid}': picture '{props.get('asset')}' not found, layer dropped")
+                continue
+            props["asset"] = a
+            aw, ah = _num(assets[a].get("width"), 0), _num(assets[a].get("height"), 0)
+            props["aspect"] = round(ah / aw, 4) if aw and ah else 1.0
+            if not _num(props.get("width")):
+                props["width"] = round(W * (0.95 if typ == "depth" else 0.5))
+            if typ == "depth" and str(props.get("move") or "orbit") not in ("orbit", "push", "pull", "drift", "pan", "tilt", "rise"):
+                warn.append(f"layer '{lid}': depth move '{props.get('move')}' is not known, using orbit")
+                props["move"] = "orbit"
+            if typ == "solid3d" and props.get("mode") not in (None, "slab", "cylinder"):
+                props.pop("mode", None)
         elif typ == "icon":
             if props.get("name") not in ICONS:
                 warn.append(f"layer '{lid}': icon '{props.get('name')}' not in the library, using star")

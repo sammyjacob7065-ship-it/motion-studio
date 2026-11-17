@@ -9,6 +9,8 @@ import { ParticlesLayer } from './blocks/Particles';
 import { CaptionsLayer } from './blocks/Captions';
 import { MagicLayer } from './blocks/Magic';
 import { GroupLayer } from './blocks/Group';
+import { DepthLayer } from './blocks/Depth';
+import { Solid3DLayer } from './blocks/Solid3D';
 import type { Layer, Timeline } from './types';
 
 /** One broken layer must never kill the whole video: it is logged (so the cause can be found) and skipped. */
@@ -38,6 +40,8 @@ export const Scene: React.FC<{ timeline: Timeline }> = ({ timeline }) => {
       case 'captions': return <CaptionsLayer layer={layer} ctx={ctx} />;
       case 'transition': return <TransitionLayer layer={layer} ctx={ctx} />;
       case 'magic': return <MagicLayer layer={layer} ctx={ctx} />;
+      case 'depth': return <DepthLayer layer={layer} ctx={ctx} />;
+      case 'solid3d': return <Solid3DLayer layer={layer} ctx={ctx} />;
       case 'group': return <GroupLayer layer={layer} ctx={ctx} renderChild={(c) => <LayerGuard id={String(c.id)} type={String(c.type)}>{render(c)}</LayerGuard>} />;
       default: return null;
     }

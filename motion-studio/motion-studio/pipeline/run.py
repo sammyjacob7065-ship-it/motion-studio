@@ -15,6 +15,8 @@ import assets as A  # noqa: E402
 import beats  # noqa: E402
 import brandsite  # noqa: E402
 import checker  # noqa: E402
+import creative  # noqa: E402
+import depth3d  # noqa: E402
 import director  # noqa: E402
 import groq  # noqa: E402
 import imagegen  # noqa: E402
@@ -439,10 +441,21 @@ def main(job):
         resumed = []
         if ck_plan and ck_plan.get("plan"):
             plan = ck_plan["plan"]
+            if ck_plan.get("creative_prompt"):
+                brief["prompt"] = ck_plan["creative_prompt"]             # the ad the creative director wrote stays the same when a job is resumed
             resumed.append("plan")
         else:
+            _cp = ""
+            try:                                                         # one or two pictures and a short wish: the studio writes the whole ad first
+                _cp, _crep = creative.expand(brief["prompt"], registry, paths)
+                if _cp:
+                    brief["prompt"] = _cp
+                    mon.note("plan", "creative ad: " + str(_crep))
+            except Exception as e:  # noqa: BLE001
+                print("::warning::creative director skipped:", str(e)[:140])
+                _cp = ""
             plan = director.plan(brief["prompt"], registry)
-            _ck_save(store, job, "plan", {"plan": plan})
+            _ck_save(store, job, "plan", {"plan": plan, "creative_prompt": _cp or ""})
         size = T.size_for(plan.get("aspect"))
         mon.done_stage("plan", f"{plan.get('aspect', '9:16')}, {len(plan.get('requirements', []))} instructions")
         if brief.get("plan_first"):
@@ -804,6 +817,12 @@ def main(job):
                 _cut_layers(tl_.get("layers", []))
             except Exception as e:  # noqa: BLE001
                 print("::warning::cut-out step skipped:", str(e)[:120])
+            try:                                                   # 3D department: depth slices and turnable objects (a layer that cannot be built becomes a plain picture)
+                _n3 = []
+                depth3d.prepare(tl_.get("layers", []), registry, paths, adir, work, A.analyze, A.cutout, _n3)
+                w_ = list(w_) + _n3
+            except Exception as e:  # noqa: BLE001
+                print("::warning::3D step skipped:", str(e)[:120])
             return tl_, w_
 
         def speech_off(t):
